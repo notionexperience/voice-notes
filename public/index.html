@@ -2,165 +2,452 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="light dark" />
+<meta name="theme-color" content="#0f0f10" />
 <title>Voice → Notion</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎙️</text></svg>" />
 <style>
-  :root { --fg:#37352f; --muted:#787774; --line:#e9e9e7; --accent:#2383e2; --red:#e03e3e; --bg:#fff; }
-  @media (prefers-color-scheme: dark) {
-    :root { --fg:#e9e9e7; --muted:#9b9a97; --line:#2f2f2f; --bg:#191919; }
+  :root{
+    --bg:#f6f5f4; --bg2:#ffffff;
+    --card:rgba(255,255,255,.72); --card-brd:rgba(0,0,0,.07);
+    --fg:#262523; --muted:#7d7b77; --line:#e6e4e1;
+    --accent:#2f6df6; --accent-fg:#fff;
+    --rec:#e5484d; --ok:#2f9e63;
+    --field:rgba(0,0,0,.035);
+    --shadow:0 1px 2px rgba(0,0,0,.05),0 12px 40px -12px rgba(0,0,0,.18);
+    --glow1:rgba(47,109,246,.20); --glow2:rgba(229,72,77,.18);
   }
-  * { box-sizing: border-box; }
-  body {
-    margin:0; padding:24px; background:var(--bg); color:var(--fg);
-    font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;
-    display:flex; justify-content:center;
+  html[data-theme="dark"]{
+    --bg:#0f0f10; --bg2:#141416;
+    --card:rgba(30,30,33,.72); --card-brd:rgba(255,255,255,.08);
+    --fg:#ededec; --muted:#9a9895; --line:#2b2b2e;
+    --accent:#5b8cff; --accent-fg:#0b0b0c;
+    --rec:#ff6369; --ok:#48c78e;
+    --field:rgba(255,255,255,.06);
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 18px 50px -14px rgba(0,0,0,.7);
+    --glow1:rgba(91,140,255,.22); --glow2:rgba(255,99,105,.18);
   }
-  .card { width:100%; max-width:420px; }
-  h1 { font-size:16px; margin:0 0 16px; font-weight:600; }
-  .timer { font-size:34px; font-variant-numeric:tabular-nums; letter-spacing:-1px; margin:8px 0 4px; }
-  .status { color:var(--muted); font-size:13px; min-height:20px; }
-  .row { display:flex; gap:8px; margin-top:16px; }
-  button {
-    font:inherit; font-weight:500; border:1px solid var(--line); background:transparent; color:var(--fg);
-    border-radius:8px; padding:9px 14px; cursor:pointer;
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font:15px/1.5 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;
+    -webkit-font-smoothing:antialiased;
+    display:flex; align-items:center; justify-content:center;
+    padding:20px; overflow-x:hidden;
   }
-  button:hover:not(:disabled) { background:rgba(127,127,127,.12); }
-  button:disabled { opacity:.4; cursor:default; }
-  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
-  button.rec { background:var(--red); border-color:var(--red); color:#fff; }
-  input[type=text] {
-    width:100%; font:inherit; color:var(--fg); background:transparent;
-    border:1px solid var(--line); border-radius:8px; padding:9px 12px; margin-top:8px;
+  body::before,body::after{
+    content:""; position:fixed; border-radius:50%; filter:blur(70px); pointer-events:none; z-index:0;
   }
-  audio { width:100%; margin-top:14px; }
-  .hint { font-size:12px; color:var(--muted); margin-top:14px; }
-  a { color:var(--accent); }
-  .hidden { display:none; }
+  body::before{width:46vmax;height:46vmax;background:var(--glow1);top:-18vmax;right:-14vmax}
+  body::after{width:38vmax;height:38vmax;background:var(--glow2);bottom:-16vmax;left:-12vmax}
+
+  .card{
+    position:relative; z-index:1; width:100%; max-width:440px;
+    background:var(--card); border:1px solid var(--card-brd); border-radius:20px;
+    box-shadow:var(--shadow); backdrop-filter:blur(20px) saturate(1.3);
+    -webkit-backdrop-filter:blur(20px) saturate(1.3);
+    padding:18px 18px 20px;
+  }
+  header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+  .brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:14.5px;letter-spacing:-.01em}
+  .brand .mic{font-size:15px}
+  .icon-btn{
+    all:unset; cursor:pointer; width:30px;height:30px;border-radius:9px;
+    display:grid;place-items:center;color:var(--muted);font-size:14px;
+  }
+  .icon-btn:hover{background:var(--field);color:var(--fg)}
+
+  .stage{
+    position:relative; margin-top:10px; border-radius:16px; background:var(--field);
+    padding:16px 14px 12px; text-align:center; overflow:hidden;
+  }
+  canvas{display:block;width:100%;height:76px}
+  .timer{
+    font-size:30px;font-weight:600;letter-spacing:-.02em;font-variant-numeric:tabular-nums;
+    margin-top:4px;
+  }
+  .timer.live{color:var(--rec)}
+  .status{font-size:12.5px;color:var(--muted);min-height:18px;margin-top:2px}
+
+  .controls{display:flex;align-items:center;justify-content:center;gap:14px;margin-top:16px}
+  .record{
+    all:unset; cursor:pointer; width:66px;height:66px;border-radius:50%;
+    background:var(--rec); display:grid;place-items:center; position:relative;
+    box-shadow:0 6px 20px -6px var(--rec); transition:transform .12s ease;
+  }
+  .record:active{transform:scale(.95)}
+  .record .glyph{width:22px;height:22px;border-radius:50%;background:#fff;transition:all .18s ease}
+  .record.on .glyph{width:19px;height:19px;border-radius:5px}
+  .record.on::after{
+    content:"";position:absolute;inset:-6px;border-radius:50%;border:2px solid var(--rec);
+    animation:pulse 1.6s ease-out infinite;
+  }
+  @keyframes pulse{0%{opacity:.65;transform:scale(.96)}100%{opacity:0;transform:scale(1.25)}}
+  .mini{
+    all:unset;cursor:pointer;height:38px;padding:0 14px;border-radius:11px;
+    border:1px solid var(--line);color:var(--fg);font-size:13.5px;font-weight:500;
+    display:inline-flex;align-items:center;gap:6px;
+  }
+  .mini:hover{background:var(--field)}
+  .mini[disabled]{opacity:.4;cursor:default}
+
+  .panel{margin-top:16px;display:none;animation:rise .22s ease both}
+  .panel.show{display:block}
+  @keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  audio{width:100%;height:38px;margin-bottom:12px}
+
+  .field{
+    width:100%;font:inherit;font-size:14px;color:var(--fg);background:var(--field);
+    border:1px solid transparent;border-radius:11px;padding:10px 12px;outline:none;
+  }
+  .field::placeholder{color:var(--muted)}
+  .field:focus{border-color:var(--accent);background:transparent}
+  .tagbox{
+    display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px;
+    background:var(--field);border:1px solid transparent;border-radius:11px;padding:6px 8px;
+  }
+  .tagbox:focus-within{border-color:var(--accent);background:transparent}
+  .tagbox input{all:unset;flex:1;min-width:110px;font-size:14px;padding:4px 2px;color:var(--fg)}
+  .chip{
+    display:inline-flex;align-items:center;gap:5px;font-size:12.5px;
+    background:var(--bg2);border:1px solid var(--line);border-radius:7px;padding:3px 6px 3px 8px;
+  }
+  html[data-theme="dark"] .chip{background:rgba(255,255,255,.07);border-color:transparent}
+  .chip b{font-weight:500}
+  .chip span{cursor:pointer;color:var(--muted);font-size:14px;line-height:1}
+  .chip span:hover{color:var(--fg)}
+
+  .actions{display:flex;gap:8px;margin-top:12px}
+  .btn{
+    all:unset;cursor:pointer;flex:1;text-align:center;height:42px;line-height:42px;
+    border-radius:12px;font-size:14px;font-weight:600;
+  }
+  .btn.primary{background:var(--accent);color:var(--accent-fg)}
+  .btn.primary:hover{filter:brightness(1.07)}
+  .btn.ghost{flex:0 0 auto;padding:0 14px;border:1px solid var(--line);font-weight:500}
+  .btn.ghost:hover{background:var(--field)}
+  .btn[disabled]{opacity:.5;cursor:default;filter:none}
+
+  .done{
+    margin-top:14px;display:none;align-items:center;gap:10px;padding:12px 14px;border-radius:13px;
+    background:color-mix(in srgb,var(--ok) 12%,transparent);border:1px solid color-mix(in srgb,var(--ok) 35%,transparent);
+    font-size:13.5px;animation:rise .22s ease both;
+  }
+  .done.show{display:flex}
+  .done .tick{width:20px;height:20px;border-radius:50%;background:var(--ok);color:#fff;display:grid;place-items:center;font-size:12px;flex:0 0 auto}
+  .done a{color:var(--fg);font-weight:600}
+
+  .note{margin-top:14px;font-size:12px;color:var(--muted);text-align:center;line-height:1.45}
+  .note a{color:var(--accent);text-decoration:none}
+  .err{color:var(--rec)}
+  .drop{outline:2px dashed var(--accent);outline-offset:4px}
+  .hidden{display:none!important}
+  .spin{display:inline-block;width:13px;height:13px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px;margin-right:7px}
+  @keyframes sp{to{transform:rotate(360deg)}}
 </style>
 </head>
 <body>
-<div class="card">
-  <h1>🎙️ Voice → Notion</h1>
+<main class="card" id="card">
+  <header>
+    <div class="brand"><span class="mic">🎙️</span> Voice → Notion</div>
+    <button class="icon-btn" id="themeBtn" title="Light / dark">◐</button>
+  </header>
 
-  <div class="timer" id="timer">00:00</div>
-  <div class="status" id="status">Ready to record</div>
+  <section class="stage">
+    <canvas id="viz"></canvas>
+    <div class="timer" id="timer">0:00</div>
+    <div class="status" id="status">Tap the button to start recording</div>
+  </section>
 
-  <div class="row">
-    <button id="recBtn" class="rec">Record</button>
-    <button id="stopBtn" disabled>Stop</button>
-    <button id="fileBtn">Upload file</button>
+  <div class="controls">
+    <button class="mini" id="uploadBtn">Upload</button>
+    <button class="record" id="recBtn" aria-label="Record"><span class="glyph"></span></button>
+    <button class="mini" id="pauseBtn" disabled>Pause</button>
     <input id="filePicker" type="file" accept="audio/*" class="hidden" />
   </div>
 
-  <audio id="player" controls class="hidden"></audio>
+  <section class="panel" id="panel">
+    <audio id="player" controls preload="metadata"></audio>
+    <input id="title" class="field" type="text" placeholder="Title (optional)" />
+    <div class="tagbox" id="tagbox">
+      <input id="tagInput" type="text" placeholder="Tags — press Enter" />
+    </div>
+    <div class="actions">
+      <button class="btn primary" id="sendBtn">Send to Notion</button>
+      <button class="btn ghost" id="discardBtn">Discard</button>
+    </div>
+  </section>
 
-  <input id="title" type="text" placeholder="Title (optional)" />
-  <input id="tags" type="text" placeholder="Tags, comma separated (optional)" />
-
-  <div class="row">
-    <button id="sendBtn" class="primary" disabled>Send to Notion</button>
-    <button id="resetBtn" disabled>Discard</button>
+  <div class="done" id="done">
+    <span class="tick">✓</span>
+    <span>Saved to Notion — <a id="doneLink" href="#" target="_blank" rel="noopener">open the note</a></span>
   </div>
 
-  <div class="hint" id="hint"></div>
-</div>
+  <div class="note" id="note">Drop an audio file anywhere on this card to upload it.</div>
+</main>
 
 <script>
-// Same origin by default. If the page is hosted on GitHub Pages, point it at the Worker:
-//   ?api=https://voice-to-notion.<subdomain>.workers.dev/api/send-to-notion
-const params = new URLSearchParams(location.search);
-const API = params.get("api") || "/api/send-to-notion";
-const APP_SECRET = params.get("key") || "";
-const MAX_BYTES = 20 * 1024 * 1024; // Notion single-part upload limit
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var params = new URLSearchParams(location.search);
+  var API = params.get("api") || "/api/send-to-notion";
+  var MAX_BYTES = 20 * 1024 * 1024;
 
-const $ = (id) => document.getElementById(id);
-const statusEl = $("status"), timerEl = $("timer"), hintEl = $("hint"), player = $("player");
-
-let recorder, chunks = [], blob = null, startedAt = 0, tick;
-
-const fmt = (s) => String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
-
-function pickMime() {
-  return ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"]
-    .find((t) => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || "";
-}
-
-function setReady(b) {
-  blob = b;
-  $("sendBtn").disabled = !b;
-  $("resetBtn").disabled = !b;
-  if (b) {
-    player.src = URL.createObjectURL(b);
-    player.classList.remove("hidden");
-    statusEl.textContent = `Recording ready · ${(b.size / 1024 / 1024).toFixed(2)} MB`;
-    if (b.size > MAX_BYTES) statusEl.textContent += " · too large";
-  } else {
-    player.classList.add("hidden");
-    player.removeAttribute("src");
-    timerEl.textContent = "00:00";
-    statusEl.textContent = "Ready to record";
-  }
-}
-
-$("recBtn").onclick = async () => {
+  /* ---- access key: accept ?key=, remember it, then clean the URL ---- */
+  var KEY_STORE = "vtn_key";
+  var APP_SECRET = "";
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const mimeType = pickMime();
-    recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-    chunks = [];
-    recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-    recorder.onstop = () => {
-      stream.getTracks().forEach((t) => t.stop());
-      clearInterval(tick);
-      setReady(new Blob(chunks, { type: (recorder.mimeType || "audio/webm").split(";")[0] }));
-    };
-    recorder.start();
-    startedAt = Date.now();
-    tick = setInterval(() => (timerEl.textContent = fmt(Math.floor((Date.now() - startedAt) / 1000))), 250);
-    statusEl.textContent = "Recording…";
-    $("recBtn").disabled = true;
-    $("stopBtn").disabled = false;
-  } catch (err) {
-    statusEl.textContent = "Microphone blocked";
-    hintEl.innerHTML =
-      'Embedded frames often block the mic. <a href="' + location.href + '" target="_blank">Open in a new tab</a> or use <b>Upload file</b>.';
-  }
-};
+    if (params.get("key")) {
+      APP_SECRET = params.get("key");
+      localStorage.setItem(KEY_STORE, APP_SECRET);
+      params.delete("key");
+      var q = params.toString();
+      history.replaceState({}, "", location.pathname + (q ? "?" + q : ""));
+    } else {
+      APP_SECRET = localStorage.getItem(KEY_STORE) || "";
+    }
+  } catch (e) { APP_SECRET = params.get("key") || ""; }
 
-$("stopBtn").onclick = () => {
-  recorder && recorder.state !== "inactive" && recorder.stop();
-  $("recBtn").disabled = false;
-  $("stopBtn").disabled = true;
-};
-
-$("fileBtn").onclick = () => $("filePicker").click();
-$("filePicker").onchange = (e) => e.target.files[0] && setReady(e.target.files[0]);
-$("resetBtn").onclick = () => { setReady(null); hintEl.textContent = ""; };
-
-$("sendBtn").onclick = async () => {
-  if (!blob) return;
-  if (blob.size > MAX_BYTES) { statusEl.textContent = "File too large (max 20 MB)"; return; }
-  $("sendBtn").disabled = true;
-  statusEl.textContent = "Sending to Notion…";
-  const headers = {
-    "content-type": blob.type || "audio/webm",
-    "x-title": encodeURIComponent($("title").value),
-    "x-tags": encodeURIComponent($("tags").value),
+  /* ---- theme ---- */
+  var root = document.documentElement;
+  var saved = null;
+  try { saved = localStorage.getItem("vtn_theme"); } catch (e) {}
+  root.dataset.theme = saved || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  $("themeBtn").onclick = function () {
+    root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
+    try { localStorage.setItem("vtn_theme", root.dataset.theme); } catch (e) {}
   };
-  if (APP_SECRET) headers["x-app-secret"] = APP_SECRET;
-  try {
-    const res = await fetch(API, { method: "POST", body: blob, headers });
-    const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error || "Upload failed");
-    statusEl.textContent = "Saved to Notion ✓";
-    hintEl.innerHTML = '<a href="' + data.url + '" target="_blank">Open the note in Notion</a>';
-    $("title").value = ""; $("tags").value = "";
-    setReady(null);
-  } catch (err) {
-    statusEl.textContent = "Error: " + err.message;
-    $("sendBtn").disabled = false;
+
+  /* ---- visualiser ---- */
+  var cv = $("viz"), ctx = cv.getContext("2d"), analyser = null, audioCtx = null, raf = 0;
+  var BARS = 44;
+  function sizeCanvas() {
+    var r = Math.max(1, window.devicePixelRatio || 1);
+    cv.width = cv.clientWidth * r; cv.height = cv.clientHeight * r;
+    ctx.setTransform(r, 0, 0, r, 0, 0);
+    if (!analyser) drawIdle();
   }
-};
+  function css(v) { return getComputedStyle(root).getPropertyValue(v).trim(); }
+  function bar(x, y, w, h, c) {
+    ctx.fillStyle = c;
+    if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(x, y, w, h, w / 2); ctx.fill(); }
+    else ctx.fillRect(x, y, w, h);
+  }
+  function drawIdle() {
+    var w = cv.clientWidth, h = cv.clientHeight, gap = w / BARS, bw = Math.max(2, gap * 0.42);
+    ctx.clearRect(0, 0, w, h);
+    for (var i = 0; i < BARS; i++) bar(i * gap + (gap - bw) / 2, h / 2 - 1.5, bw, 3, css("--line"));
+  }
+  function drawLive() {
+    raf = requestAnimationFrame(drawLive);
+    var w = cv.clientWidth, h = cv.clientHeight, gap = w / BARS, bw = Math.max(2, gap * 0.42);
+    var data = new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteFrequencyData(data);
+    ctx.clearRect(0, 0, w, h);
+    var step = Math.floor(data.length / BARS) || 1;
+    for (var i = 0; i < BARS; i++) {
+      var v = 0;
+      for (var j = 0; j < step; j++) v = Math.max(v, data[i * step + j] || 0);
+      var bh = Math.max(3, (v / 255) * (h - 8));
+      bar(i * gap + (gap - bw) / 2, (h - bh) / 2, bw, bh, css("--rec"));
+    }
+  }
+  addEventListener("resize", sizeCanvas);
+  sizeCanvas();
+
+  /* ---- state ---- */
+  var recorder = null, chunks = [], blob = null, stream = null;
+  var elapsed = 0, lastTick = 0, tick = 0, tags = [];
+  function fmt(s) { return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); }
+  function setStatus(t, isErr) { $("status").textContent = t; $("status").classList.toggle("err", !!isErr); }
+  function note(html) { $("note").innerHTML = html; }
+  function startClock() {
+    lastTick = Date.now();
+    tick = setInterval(function () {
+      elapsed += (Date.now() - lastTick) / 1000; lastTick = Date.now();
+      $("timer").textContent = fmt(Math.floor(elapsed));
+    }, 200);
+  }
+  function stopClock() { clearInterval(tick); tick = 0; }
+
+  function review(b) {
+    blob = b;
+    if (!b) {
+      $("panel").classList.remove("show");
+      $("player").removeAttribute("src");
+      $("timer").textContent = "0:00"; $("timer").classList.remove("live");
+      elapsed = 0; setStatus("Tap the button to start recording");
+      drawIdle();
+      return;
+    }
+    $("player").src = URL.createObjectURL(b);
+    $("panel").classList.add("show");
+    $("done").classList.remove("show");
+    var mb = (b.size / 1048576).toFixed(2);
+    if (b.size > MAX_BYTES) { setStatus("Too large: " + mb + " MB (max 20 MB)", true); $("sendBtn").disabled = true; }
+    else { setStatus("Ready to send · " + mb + " MB"); $("sendBtn").disabled = false; }
+  }
+
+  /* ---- recording ---- */
+  function pickMime() {
+    var list = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
+    for (var i = 0; i < list.length; i++) {
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported(list[i])) return list[i];
+    }
+    return "";
+  }
+
+  async function startRec() {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    } catch (err) {
+      setStatus("Microphone blocked", true);
+      note('Embedded frames often block the mic. <a href="' + location.href + '" target="_blank" rel="noopener">Open in a new tab</a> or use <b>Upload</b>.');
+      return;
+    }
+    var mime = pickMime();
+    recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    chunks = []; elapsed = 0; review(null); $("done").classList.remove("show");
+    recorder.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
+    recorder.onstop = function () {
+      stopClock();
+      cancelAnimationFrame(raf); raf = 0;
+      if (audioCtx) { audioCtx.close(); audioCtx = null; } analyser = null;
+      drawIdle();
+      if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+      var type = (recorder.mimeType || "audio/webm").split(";")[0];
+      review(new Blob(chunks, { type: type }));
+      $("recBtn").classList.remove("on");
+      $("timer").classList.remove("live");
+      $("pauseBtn").disabled = true; $("pauseBtn").textContent = "Pause";
+    };
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256; analyser.smoothingTimeConstant = 0.75;
+      audioCtx.createMediaStreamSource(stream).connect(analyser);
+      drawLive();
+    } catch (e) { analyser = null; }
+
+    recorder.start();
+    startClock();
+    $("recBtn").classList.add("on");
+    $("timer").classList.add("live");
+    $("pauseBtn").disabled = false;
+    setStatus("Recording…");
+    note("Tap the square to stop.");
+  }
+
+  $("recBtn").onclick = function () {
+    if (recorder && recorder.state !== "inactive") recorder.stop();
+    else startRec();
+  };
+
+  $("pauseBtn").onclick = function () {
+    if (!recorder) return;
+    if (recorder.state === "recording") {
+      recorder.pause(); stopClock();
+      cancelAnimationFrame(raf); raf = 0;
+      $("pauseBtn").textContent = "Resume"; setStatus("Paused");
+      $("recBtn").classList.remove("on");
+    } else if (recorder.state === "paused") {
+      recorder.resume(); startClock();
+      if (analyser) drawLive();
+      $("pauseBtn").textContent = "Pause"; setStatus("Recording…");
+      $("recBtn").classList.add("on");
+    }
+  };
+
+  /* ---- file input + drag and drop ---- */
+  $("uploadBtn").onclick = function () { $("filePicker").click(); };
+  $("filePicker").onchange = function (e) {
+    var f = e.target.files[0];
+    if (f) { elapsed = 0; $("timer").textContent = "0:00"; review(f); if (!$("title").value) $("title").value = f.name.replace(/\.[^.]+$/, ""); }
+  };
+  var card = $("card");
+  ["dragenter", "dragover"].forEach(function (ev) {
+    card.addEventListener(ev, function (e) { e.preventDefault(); card.classList.add("drop"); });
+  });
+  ["dragleave", "drop"].forEach(function (ev) {
+    card.addEventListener(ev, function (e) { e.preventDefault(); card.classList.remove("drop"); });
+  });
+  card.addEventListener("drop", function (e) {
+    var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f && /^audio\//.test(f.type)) { elapsed = 0; $("timer").textContent = "0:00"; review(f); }
+  });
+
+  /* ---- tag chips ---- */
+  function renderTags() {
+    $("tagbox").querySelectorAll(".chip").forEach(function (c) { c.remove(); });
+    tags.forEach(function (t, i) {
+      var el = document.createElement("span");
+      el.className = "chip";
+      el.innerHTML = "<b></b><span>×</span>";
+      el.querySelector("b").textContent = t;
+      el.querySelector("span").onclick = function () { tags.splice(i, 1); renderTags(); };
+      $("tagbox").insertBefore(el, $("tagInput"));
+    });
+  }
+  $("tagInput").addEventListener("keydown", function (e) {
+    if (e.key === "Enter" || e.key === ",") {
+      e.preventDefault();
+      var v = this.value.trim().replace(/,$/, "");
+      if (v && tags.indexOf(v) === -1) { tags.push(v); renderTags(); }
+      this.value = "";
+    } else if (e.key === "Backspace" && !this.value && tags.length) {
+      tags.pop(); renderTags();
+    }
+  });
+
+  /* ---- send ---- */
+  $("discardBtn").onclick = function () { review(null); note("Drop an audio file anywhere on this card to upload it."); };
+
+  $("sendBtn").onclick = async function () {
+    if (!blob) return;
+    if (blob.size > MAX_BYTES) { setStatus("File too large (max 20 MB)", true); return; }
+    var pending = $("tagInput").value.trim();
+    if (pending && tags.indexOf(pending) === -1) { tags.push(pending); $("tagInput").value = ""; renderTags(); }
+
+    $("sendBtn").disabled = true;
+    $("sendBtn").innerHTML = '<span class="spin"></span>Sending…';
+    setStatus("Uploading to Notion…");
+
+    var headers = {
+      "content-type": blob.type || "audio/webm",
+      "x-title": encodeURIComponent($("title").value || ""),
+      "x-tags": encodeURIComponent(tags.join(","))
+    };
+    if (APP_SECRET) headers["x-app-secret"] = APP_SECRET;
+
+    try {
+      var res = await fetch(API, { method: "POST", body: blob, headers: headers, credentials: "same-origin" });
+      var data = await res.json().catch(function () { return {}; });
+      if (res.status === 401) throw new Error("Unauthorized — the access key is missing or wrong");
+      if (!res.ok || !data.ok) throw new Error(data.error || ("Upload failed (" + res.status + ")"));
+      $("doneLink").href = data.url || "#";
+      $("done").classList.add("show");
+      $("title").value = ""; tags = []; renderTags();
+      review(null);
+      setStatus("Saved. Ready for the next one.");
+      note("Drop an audio file anywhere on this card to upload it.");
+    } catch (err) {
+      setStatus(err.message, true);
+      $("sendBtn").disabled = false;
+    } finally {
+      $("sendBtn").textContent = "Send to Notion";
+    }
+  };
+
+  /* ---- shortcut: space toggles recording ---- */
+  addEventListener("keydown", function (e) {
+    if (e.code === "Space" && !/^(INPUT|TEXTAREA|AUDIO|BUTTON)$/.test(document.activeElement.tagName)) {
+      e.preventDefault(); $("recBtn").click();
+    }
+  });
+})();
 </script>
 </body>
 </html>
