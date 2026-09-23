@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "voice-notes",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-09-23",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "observability": { "enabled": true },
+
+  // Non-secret settings. Secrets (NOTION_TOKEN, APP_SECRET, OPENAI_API_KEY)
+  // are set with `wrangler secret put` or in the Cloudflare dashboard.
+  "vars": {
+    "TIMEZONE": "Europe/Berlin"
+    // "NOTION_DATABASE_ID": "your32characterdatabaseid",
+    // "NOTION_AUDIO_PROP": "Attachments",
+    // "ALLOWED_ORIGIN": "https://username.github.io"
+  }
+}

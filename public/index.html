@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Voice → Notion</title>
+<style>
+  :root { --fg:#37352f; --muted:#787774; --line:#e9e9e7; --accent:#2383e2; --red:#e03e3e; --bg:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg:#e9e9e7; --muted:#9b9a97; --line:#2f2f2f; --bg:#191919; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; padding:24px; background:var(--bg); color:var(--fg);
+    font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;
+    display:flex; justify-content:center;
+  }
+  .card { width:100%; max-width:420px; }
+  h1 { font-size:16px; margin:0 0 16px; font-weight:600; }
+  .timer { font-size:34px; font-variant-numeric:tabular-nums; letter-spacing:-1px; margin:8px 0 4px; }
+  .status { color:var(--muted); font-size:13px; min-height:20px; }
+  .row { display:flex; gap:8px; margin-top:16px; }
+  button {
+    font:inherit; font-weight:500; border:1px solid var(--line); background:transparent; color:var(--fg);
+    border-radius:8px; padding:9px 14px; cursor:pointer;
+  }
+  button:hover:not(:disabled) { background:rgba(127,127,127,.12); }
+  button:disabled { opacity:.4; cursor:default; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.rec { background:var(--red); border-color:var(--red); color:#fff; }
+  input[type=text] {
+    width:100%; font:inherit; color:var(--fg); background:transparent;
+    border:1px solid var(--line); border-radius:8px; padding:9px 12px; margin-top:8px;
+  }
+  audio { width:100%; margin-top:14px; }
+  .hint { font-size:12px; color:var(--muted); margin-top:14px; }
+  a { color:var(--accent); }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🎙️ Voice → Notion</h1>
+
+  <div class="timer" id="timer">00:00</div>
+  <div class="status" id="status">Ready to record</div>
+
+  <div class="row">
+    <button id="recBtn" class="rec">Record</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <button id="fileBtn">Upload file</button>
+    <input id="filePicker" type="file" accept="audio/*" class="hidden" />
+  </div>
+
+  <audio id="player" controls class="hidden"></audio>
+
+  <input id="title" type="text" placeholder="Title (optional)" />
+  <input id="tags" type="text" placeholder="Tags, comma separated (optional)" />
+
+  <div class="row">
+    <button id="sendBtn" class="primary" disabled>Send to Notion</button>
+    <button id="resetBtn" disabled>Discard</button>
+  </div>
+
+  <div class="hint" id="hint"></div>
+</div>
+
+<script>
+// Same origin by default. If the page is hosted on GitHub Pages, point it at the Worker:
+//   ?api=https://voice-to-notion.<subdomain>.workers.dev/api/send-to-notion
+const params = new URLSearchParams(location.search);
+const API = params.get("api") || "/api/send-to-notion";
+const APP_SECRET = params.get("key") || "";
+const MAX_BYTES = 20 * 1024 * 1024; // Notion single-part upload limit
+
+const $ = (id) => document.getElementById(id);
+const statusEl = $("status"), timerEl = $("timer"), hintEl = $("hint"), player = $("player");
+
+let recorder, chunks = [], blob = null, startedAt = 0, tick;
+
+const fmt = (s) => String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
+
+function pickMime() {
+  return ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"]
+    .find((t) => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || "";
+}
+
+function setReady(b) {
+  blob = b;
+  $("sendBtn").disabled = !b;
+  $("resetBtn").disabled = !b;
+  if (b) {
+    player.src = URL.createObjectURL(b);
+    player.classList.remove("hidden");
+    statusEl.textContent = `Recording ready · ${(b.size / 1024 / 1024).toFixed(2)} MB`;
+    if (b.size > MAX_BYTES) statusEl.textContent += " · too large";
+  } else {
+    player.classList.add("hidden");
+    player.removeAttribute("src");
+    timerEl.textContent = "00:00";
+    statusEl.textContent = "Ready to record";
+  }
+}
+
+$("recBtn").onclick = async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = pickMime();
+    recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    chunks = [];
+    recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+    recorder.onstop = () => {
+      stream.getTracks().forEach((t) => t.stop());
+      clearInterval(tick);
+      setReady(new Blob(chunks, { type: (recorder.mimeType || "audio/webm").split(";")[0] }));
+    };
+    recorder.start();
+    startedAt = Date.now();
+    tick = setInterval(() => (timerEl.textContent = fmt(Math.floor((Date.now() - startedAt) / 1000))), 250);
+    statusEl.textContent = "Recording…";
+    $("recBtn").disabled = true;
+    $("stopBtn").disabled = false;
+  } catch (err) {
+    statusEl.textContent = "Microphone blocked";
+    hintEl.innerHTML =
+      'Embedded frames often block the mic. <a href="' + location.href + '" target="_blank">Open in a new tab</a> or use <b>Upload file</b>.';
+  }
+};
+
+$("stopBtn").onclick = () => {
+  recorder && recorder.state !== "inactive" && recorder.stop();
+  $("recBtn").disabled = false;
+  $("stopBtn").disabled = true;
+};
+
+$("fileBtn").onclick = () => $("filePicker").click();
+$("filePicker").onchange = (e) => e.target.files[0] && setReady(e.target.files[0]);
+$("resetBtn").onclick = () => { setReady(null); hintEl.textContent = ""; };
+
+$("sendBtn").onclick = async () => {
+  if (!blob) return;
+  if (blob.size > MAX_BYTES) { statusEl.textContent = "File too large (max 20 MB)"; return; }
+  $("sendBtn").disabled = true;
+  statusEl.textContent = "Sending to Notion…";
+  const headers = {
+    "content-type": blob.type || "audio/webm",
+    "x-title": encodeURIComponent($("title").value),
+    "x-tags": encodeURIComponent($("tags").value),
+  };
+  if (APP_SECRET) headers["x-app-secret"] = APP_SECRET;
+  try {
+    const res = await fetch(API, { method: "POST", body: blob, headers });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || "Upload failed");
+    statusEl.textContent = "Saved to Notion ✓";
+    hintEl.innerHTML = '<a href="' + data.url + '" target="_blank">Open the note in Notion</a>';
+    $("title").value = ""; $("tags").value = "";
+    setReady(null);
+  } catch (err) {
+    statusEl.textContent = "Error: " + err.message;
+    $("sendBtn").disabled = false;
+  }
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+# Copy to .dev.vars for local development with `npx wrangler dev`.
+# In production these live as Worker secrets, never in the repo.
+
+NOTION_TOKEN="ntn_your_internal_connection_token"
+NOTION_DATABASE_ID="your32characterdatabaseid"
+APP_SECRET="some_long_random_string"
+
+# Optional
+TIMEZONE="Europe/Berlin"
+ALLOWED_ORIGIN="*"

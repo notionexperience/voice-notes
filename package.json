@@ -1,0 +1,14 @@
+{
+  "name": "voice-notes",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Record a voice note in the browser and file it in a Notion database.",
+  "license": "MIT",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4"
+  }
+}

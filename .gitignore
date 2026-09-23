@@ -1,0 +1,17 @@
+# secrets — never commit
+.dev.vars
+.env
+!.dev.vars.example
+
+# cloudflare
+.wrangler/
+
+# node
+node_modules/
+npm-debug.log*
+
+# os / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
