@@ -57,6 +57,12 @@ function pickProp(schema, type, override) {
   return Object.keys(schema).find((k) => schema[k].type === type) || null;
 }
 
+// Match a property by its exact name — use this when a database has several
+// properties of the same type (e.g. Pin / Archive / Audio are all checkboxes).
+function byName(schema, name, type) {
+  return name && schema[name]?.type === type ? name : null;
+}
+
 async function transcribe(env, blob, filename) {
   if (!env.OPENAI_API_KEY) return "";
   const form = new FormData();
@@ -107,6 +113,7 @@ async function handleUpload(request, env) {
   const filesProp = pickProp(schema, "files", env.NOTION_AUDIO_PROP);
   const dateProp = pickProp(schema, "date", env.NOTION_DATE_PROP);
   const tagsProp = pickProp(schema, "multi_select", env.NOTION_TAGS_PROP);
+  const audioFlagProp = byName(schema, env.NOTION_AUDIO_FLAG_PROP || "Audio", "checkbox");
 
   // 1. reserve an upload slot, 2. send the bytes
   const upload = await notion(env, "/file_uploads", {
@@ -137,6 +144,7 @@ async function handleUpload(request, env) {
     .map((t) => t.trim())
     .filter(Boolean);
   if (tagsProp && tags.length) properties[tagsProp] = { multi_select: tags.map((name) => ({ name })) };
+  if (audioFlagProp) properties[audioFlagProp] = { checkbox: true };
 
   const children = [
     { object: "block", type: "audio", audio: { type: "file_upload", file_upload: { id: upload.id } } },
