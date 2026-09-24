@@ -9,17 +9,27 @@ APP_SECRET="some_long_random_string"
 
 # Optional — uncomment what you need.
 
-# Transcription and summarisation are free and automatic through the Workers AI
-# binding. No API key, no card.
+# Words Whisper reliably mis-hears. These are fed to the transcriber and named
+# again during clean-up, which fixes "motion" / "ocean" for "Notion".
+# Add your own jargon, product names and the names of people you mention.
+# VOCABULARY="Notion, Notion AI, Obsidian, Apple Notes"
+
+# Transcription, summaries and punctuation all run on the free Workers AI
+# binding. No API key, no card, no third-party account.
 # CF_TRANSCRIBE_MODEL="@cf/openai/whisper-large-v3-turbo"
 # TRANSCRIBE_MAX_MB="3"
 # TRANSCRIBE_LANGUAGE="en"
 
+# Summary, key points and action items.
 # SUMMARY_ENABLED="false"          # turn summaries off entirely
 # SUMMARY_MODEL="@cf/meta/llama-3.1-8b-instruct-fp8-fast"
 # SUMMARY_LANGUAGE="English"       # default: match the speaker
 # SUMMARY_MIN_WORDS="25"           # skip summarising very short notes
 # SUMMARY_MAX_CHARS="12000"        # transcript characters sent to the model
+
+# Transcript clean-up: restores punctuation, capitals and paragraphs.
+# POLISH_ENABLED="false"           # keep the raw Whisper output instead
+# POLISH_MAX_CHARS="12000"         # longer transcripts stay raw
 
 # Property name overrides — only needed if auto-detection picks the wrong one.
 # NOTION_TITLE_PROP=""
