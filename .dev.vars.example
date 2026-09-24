@@ -1,10 +1,33 @@
 # Copy to .dev.vars for local development with `npx wrangler dev`.
 # In production these live as Worker secrets, never in the repo.
+# Only the three below are required — the Deploy to Cloudflare wizard asks for
+# exactly the uncommented keys in this file.
 
 NOTION_TOKEN="ntn_your_internal_connection_token"
 NOTION_DATABASE_ID="your32characterdatabaseid"
 APP_SECRET="some_long_random_string"
 
-# Optional
-TIMEZONE="Europe/Berlin"
-ALLOWED_ORIGIN="*"
+# Optional — uncomment what you need.
+
+# Transcription and summarisation are free and automatic through the Workers AI
+# binding. No API key, no card.
+# CF_TRANSCRIBE_MODEL="@cf/openai/whisper-large-v3-turbo"
+# TRANSCRIBE_MAX_MB="3"
+# TRANSCRIBE_LANGUAGE="en"
+
+# SUMMARY_ENABLED="false"          # turn summaries off entirely
+# SUMMARY_MODEL="@cf/meta/llama-3.1-8b-instruct-fp8-fast"
+# SUMMARY_LANGUAGE="English"       # default: match the speaker
+# SUMMARY_MIN_WORDS="25"           # skip summarising very short notes
+# SUMMARY_MAX_CHARS="12000"        # transcript characters sent to the model
+
+# Property name overrides — only needed if auto-detection picks the wrong one.
+# NOTION_TITLE_PROP=""
+# NOTION_AUDIO_PROP=""
+# NOTION_DATE_PROP=""
+# NOTION_TAGS_PROP=""
+# NOTION_AUDIO_FLAG_PROP="Audio"
+# NOTION_SUMMARY_PROP="Summary"
+
+# TIMEZONE="Europe/Berlin"
+# ALLOWED_ORIGIN="*"
