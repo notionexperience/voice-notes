@@ -1,4 +1,4 @@
-# Voice â†’ Notion
+# Voice → Notion
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/notionexperience/voice-notes)
 
@@ -10,8 +10,8 @@ Free to run: GitHub for the code, Cloudflare Workers for hosting (100,000 reques
 plan, no credit card).
 
 ```
-browser (public/index.html)  â†’  Worker (src/worker.js)  â†’  Notion API
-     MediaRecorder                 holds the token          upload â†’ create row
+browser (public/index.html)  →  Worker (src/worker.js)  →  Notion API
+     MediaRecorder                 holds the token          upload → create row
 ```
 
 The Worker exists because browsers cannot call the Notion API directly (no CORS headers) and an
@@ -23,8 +23,8 @@ integration token must never sit in client-side code.
 
 ### 1. Notion token
 
-Notion â†’ `Settings` â†’ `Connections` â†’ enable **Developer mode** â†’ **Personal access tokens** â†’
-`+ New connection` â†’ `â€¢â€¢â€¢` â†’ **Copy internal connection token** (`ntn_â€¦`).
+Notion → `Settings` → `Connections` → enable **Developer mode** → **Personal access tokens** →
+`+ New connection` → `â€¢â€¢â€¢` → **Copy internal connection token** (`ntn_â€¦`).
 
 ### 2. Target database
 
@@ -39,7 +39,7 @@ name so it cannot collide with other checkboxes:
 | Tags | Multi-select | tags typed in the recorder (optional) |
 | Audio | Checkbox | ticked on every voice entry (optional) |
 
-Missing properties are skipped. On the database: `â€¢â€¢â€¢` â†’ **Connections** â†’ add your connection.
+Missing properties are skipped. On the database: `â€¢â€¢â€¢` → **Connections** → add your connection.
 Copy the 32-character ID from the URL, before `?v=`.
 
 ### 3. Deploy
@@ -73,7 +73,7 @@ npx wrangler secret put OPENAI_API_KEY   # optional, enables transcription
 ```
 
 Change `name` in `wrangler.jsonc` first â€” Worker names are unique per account. Secrets can also be
-set in the dashboard: Worker â†’ `Settings` â†’ `Variables and Secrets` â†’ **Add**.
+set in the dashboard: Worker → `Settings` → `Variables and Secrets` → **Add**.
 
 </details>
 
@@ -91,9 +91,9 @@ works on that device. Bookmark it, or add it to your phone's home screen.
 - Big red button or **Space** starts and stops recording; **Pause** suspends it.
 - **Upload**, or drag an audio file onto the card, works instead of recording.
 - Tags: type and press Enter for each one.
-- **Send to Notion** â†’ a link to the new note appears.
+- **Send to Notion** → a link to the new note appears.
 
-In Notion you can paste the URL â†’ **Create embed**, but embedded frames usually block the
+In Notion you can paste the URL → **Create embed**, but embedded frames usually block the
 microphone. Open the link in a browser tab for recording.
 
 ---
@@ -121,11 +121,11 @@ Non-secret values can go in `wrangler.jsonc` under `vars`; secrets belong in Wor
 
 Cloudflare Access puts a real sign-in in front of the Worker, including its `workers.dev` hostname.
 
-1. Add Google as a login method: Zero Trust â†’ **Integrations** â†’ **Identity providers** â†’ Google.
+1. Add Google as a login method: Zero Trust → **Integrations** → **Identity providers** → Google.
    You need a Google OAuth client whose redirect URI is
    `https://<team-name>.cloudflareaccess.com/cdn-cgi/access/callback`.
-2. Workers & Pages â†’ your Worker â†’ **Access** tab â†’ **Protect this Worker behind Access** â†’
-   **All traffic** â†’ add a policy allowing your email â†’ **Apply Access**.
+2. Workers & Pages → your Worker → **Access** tab → **Protect this Worker behind Access** →
+   **All traffic** → add a policy allowing your email → **Apply Access**.
 3. Optional: delete the `APP_SECRET` secret. The Worker skips the key check when it is absent, so
    the URL becomes clean.
 
@@ -147,7 +147,7 @@ Optional, and only if you want the page on your own GitHub domain. GitHub Pages 
 repository root or `/docs` â€” not from `/public`.
 
 1. Move `public/index.html` to `docs/index.html`.
-2. Repo â†’ `Settings` â†’ `Pages` â†’ deploy from `main`, folder `/docs`.
+2. Repo → `Settings` → `Pages` → deploy from `main`, folder `/docs`.
 3. In `wrangler.jsonc`, remove the `assets` block; in `src/worker.js`, remove the
    `env.ASSETS.fetch(request)` fallback so the Worker serves the API only.
 4. Set `ALLOWED_ORIGIN` to `https://<username>.github.io`.
@@ -181,4 +181,4 @@ npx wrangler dev
 
 ## License
 
-MIT â€” see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).
