@@ -1,12 +1,13 @@
 // Cloudflare Worker — receives a voice recording and files it in a Notion database.
 // Audio arrives as the raw request body; metadata travels in headers.
 //
-// Pipeline: auth → upload audio to Notion → transcribe (Workers AI) →
-//           summarise (Workers AI) → create the row.
-// Both AI steps are free, key-less and non-blocking: if either fails the note
-// is still created with its audio attached.
+// Pipeline: auth → transcribe (Whisper) → upload audio + summarise + punctuate
+//           (all in parallel) → create the row.
+// Every AI step is free, key-less and non-blocking: if one fails the note is
+// still created with its audio attached.
 
 const NOTION_API = "https://api.notion.com/v1";
+const DEFAULT_LLM = "@cf/meta/llama-3.1-8b-instruct-fp8-fast";
 
 const EXT_BY_MIME = {
   "audio/webm": "weba",
@@ -68,6 +69,49 @@ function byName(schema, name, type) {
   return name && schema[name]?.type === type ? name : null;
 }
 
+// ---- Text and block helpers --------------------------------------------
+
+const chunk = (text, size = 1800) => text.match(new RegExp(`[\\s\\S]{1,${size}}`, "g")) || [];
+const words = (s) => s.split(/\s+/).filter(Boolean).length;
+const rich = (content) => [{ type: "text", text: { content } }];
+
+const heading = (content) => ({
+  object: "block",
+  type: "heading_3",
+  heading_3: { rich_text: rich(content) },
+});
+const paragraph = (content) => ({
+  object: "block",
+  type: "paragraph",
+  paragraph: { rich_text: rich(content) },
+});
+const bullet = (content) => ({
+  object: "block",
+  type: "bulleted_list_item",
+  bulleted_list_item: { rich_text: rich(content.slice(0, 1800)) },
+});
+const todo = (content) => ({
+  object: "block",
+  type: "to_do",
+  to_do: { rich_text: rich(content.slice(0, 1800)), checked: false },
+});
+
+// Respect the paragraph breaks the clean-up step introduced.
+const transcriptBlocks = (text) =>
+  text
+    .split(/\n{2,}/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .flatMap((p) => chunk(p).map(paragraph));
+
+const decodeHeader = (v) => {
+  try {
+    return decodeURIComponent(v || "").trim();
+  } catch {
+    return "";
+  }
+};
+
 // ---- Transcription (free, Cloudflare Workers AI) ------------------------
 
 // btoa() chokes on very large argument lists, so encode in chunks.
@@ -102,8 +146,55 @@ async function transcribe(env, blob) {
   }
 }
 
+// ---- Transcript clean-up (free, Cloudflare Workers AI) ------------------
+// Whisper returns one long unpunctuated lowercase run. This restores sentences
+// and paragraphs without rewording. Chunks run in parallel, so the whole step
+// costs roughly the latency of a single call.
+// Set POLISH_ENABLED="false" to keep the raw Whisper output.
+
+const POLISH_PROMPT = [
+  "You restore punctuation and capitalisation in speech-to-text output.",
+  "Rules:",
+  "- Keep every word the speaker said. Never summarise, reorder, add or delete content.",
+  "- Add full stops, commas, question marks and capital letters.",
+  "- Start a new paragraph when the topic shifts. Separate paragraphs with a blank line.",
+  "- Capitalise obvious product and brand names (for example 'notion' becomes 'Notion').",
+  "- Remove filler only when it is pure noise: um, uh, er.",
+  "Return the corrected text only. No preamble, no quotes, no commentary.",
+].join("\n");
+
+async function polishChunk(env, model, text) {
+  const out = await env.AI.run(model, {
+    messages: [
+      { role: "system", content: POLISH_PROMPT },
+      { role: "user", content: text },
+    ],
+    max_tokens: Math.min(4000, Math.ceil(text.length / 2) + 200),
+    temperature: 0.1,
+  });
+  const cleaned = (typeof out?.response === "string" ? out.response : "").trim();
+  // A model that truncates or editorialises is worse than no clean-up at all,
+  // so only accept output that still has roughly the original word count.
+  const ratio = cleaned ? words(cleaned) / Math.max(1, words(text)) : 0;
+  return ratio >= 0.75 && ratio <= 1.35 ? cleaned : text;
+}
+
+async function polish(env, transcript) {
+  if (!env.AI || !transcript) return transcript;
+  if (String(env.POLISH_ENABLED).toLowerCase() === "false") return transcript;
+  if (transcript.length > Number(env.POLISH_MAX_CHARS || 12000)) return transcript;
+  const model = env.SUMMARY_MODEL || DEFAULT_LLM;
+  try {
+    const parts = chunk(transcript, 2000);
+    const cleaned = await Promise.all(parts.map((p) => polishChunk(env, model, p)));
+    return cleaned.join("\n\n");
+  } catch {
+    return transcript;
+  }
+}
+
 // ---- Summarisation (free, Cloudflare Workers AI) ------------------------
-// Turns the raw transcript into a title, a short summary and action items.
+// Produces a title, a short summary, key points and action items.
 // Set SUMMARY_ENABLED="false" to switch this off.
 
 const SUMMARY_SCHEMA = {
@@ -111,9 +202,10 @@ const SUMMARY_SCHEMA = {
   properties: {
     title: { type: "string" },
     summary: { type: "string" },
+    key_points: { type: "array", items: { type: "string" } },
     actions: { type: "array", items: { type: "string" } },
   },
-  required: ["title", "summary", "actions"],
+  required: ["title", "summary", "key_points", "actions"],
 };
 
 function summaryPrompt(env) {
@@ -121,14 +213,27 @@ function summaryPrompt(env) {
     ? `Write every field in ${env.SUMMARY_LANGUAGE}.`
     : "Write in the same language the speaker used.";
   return [
-    "You clean up voice notes. The user speaks off the cuff, so the transcript rambles and may contain transcription errors.",
+    "You turn rambling voice notes into structured notes. The transcript is speech-to-text and may contain mis-hearings.",
     "Return JSON only, with these keys:",
     '- "title": a specific headline of at most 8 words. No quotes, no trailing period.',
-    '- "summary": 2-4 sentences covering what was actually said. Keep names, numbers and decisions. Never invent detail.',
-    '- "actions": an array of short imperative tasks the speaker committed to. Use [] when there are none.',
+    '- "summary": 1-3 sentences on what this note is about. Do not enumerate the items — the arrays below do that.',
+    '- "key_points": an array of the note\'s substance: facts, observations, opinions, decisions, details worth keeping.',
+    '- "actions": an array of short imperative tasks. Include anything the speaker wants to make, do, buy, fix, follow up on or decide. When the note is a list of ideas or plans, each entry becomes an action.',
+    "Rules:",
+    "- Never place the same item in both key_points and actions. Choose the better fit.",
+    "- Never invent detail. Keep names, numbers and specifics exactly as spoken.",
+    "- Use [] for an empty array, never null.",
     language,
   ].join("\n");
 }
+
+// Loose comparison so an item never appears as both a bullet and a checkbox.
+const normalise = (s) =>
+  s
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 
 function parseSummary(out) {
   let data = out?.response ?? out;
@@ -142,30 +247,40 @@ function parseSummary(out) {
     }
   }
   if (!data || typeof data !== "object") return null;
+
   const clean = (v) => (typeof v === "string" ? v.trim() : "");
+  const list = (v) => (Array.isArray(v) ? v.map(clean).filter(Boolean) : []);
+
+  const actions = list(data.actions).slice(0, 25);
+  const seen = actions.map(normalise);
+  const keyPoints = list(data.key_points)
+    .filter((p) => {
+      const n = normalise(p);
+      return !seen.some((a) => a === n || a.includes(n) || n.includes(a));
+    })
+    .slice(0, 25);
+
   const result = {
     title: clean(data.title).replace(/^["']|["'.]+$/g, "").slice(0, 120),
     summary: clean(data.summary),
-    actions: Array.isArray(data.actions)
-      ? data.actions.map(clean).filter(Boolean).slice(0, 25)
-      : [],
+    keyPoints,
+    actions,
   };
-  return result.summary || result.actions.length ? result : null;
+  return result.summary || result.keyPoints.length || result.actions.length ? result : null;
 }
 
 async function summarize(env, transcript) {
   if (!env.AI || !transcript) return null;
   if (String(env.SUMMARY_ENABLED).toLowerCase() === "false") return null;
   // A one-line note is already its own summary.
-  const words = transcript.split(/\s+/).filter(Boolean).length;
-  if (words < Number(env.SUMMARY_MIN_WORDS || 25)) return null;
+  if (words(transcript) < Number(env.SUMMARY_MIN_WORDS || 25)) return null;
 
-  const model = env.SUMMARY_MODEL || "@cf/meta/llama-3.1-8b-instruct-fp8-fast";
+  const model = env.SUMMARY_MODEL || DEFAULT_LLM;
   const messages = [
     { role: "system", content: summaryPrompt(env) },
     { role: "user", content: transcript.slice(0, Number(env.SUMMARY_MAX_CHARS || 12000)) },
   ];
-  const base = { messages, max_tokens: 700, temperature: 0.2 };
+  const base = { messages, max_tokens: 900, temperature: 0.2 };
 
   try {
     const out = await env.AI.run(model, {
@@ -185,33 +300,7 @@ async function summarize(env, transcript) {
   }
 }
 
-// ---- Notion block helpers ----------------------------------------------
-
-const chunk = (text, size = 1800) => text.match(new RegExp(`[\\s\\S]{1,${size}}`, "g")) || [];
-const rich = (content) => [{ type: "text", text: { content } }];
-const heading = (content) => ({
-  object: "block",
-  type: "heading_3",
-  heading_3: { rich_text: rich(content) },
-});
-const paragraph = (content) => ({
-  object: "block",
-  type: "paragraph",
-  paragraph: { rich_text: rich(content) },
-});
-const todo = (content) => ({
-  object: "block",
-  type: "to_do",
-  to_do: { rich_text: rich(content.slice(0, 1800)), checked: false },
-});
-
-const decodeHeader = (v) => {
-  try {
-    return decodeURIComponent(v || "").trim();
-  } catch {
-    return "";
-  }
-};
+// ---- Notion upload -----------------------------------------------------
 
 async function uploadAudio(env, file, filename, mime) {
   const upload = await notion(env, "/file_uploads", {
@@ -239,16 +328,17 @@ async function handleUpload(request, env) {
   const filename = `voice-note-${stamp}.${ext}`;
   const file = new File([audio], filename, { type: mime });
 
-  const [dataSourceId, transcript] = await Promise.all([
+  const [dataSourceId, raw] = await Promise.all([
     resolveDataSourceId(env),
     transcribe(env, file),
   ]);
 
-  // Reading the schema, pushing the bytes and summarising are independent.
-  const [ds, upload, summary] = await Promise.all([
+  // Schema read, byte push, summary and clean-up are all independent.
+  const [ds, upload, summary, transcript] = await Promise.all([
     notion(env, `/data_sources/${dataSourceId}`),
     uploadAudio(env, file, filename, mime),
-    summarize(env, transcript),
+    summarize(env, raw),
+    polish(env, raw),
   ]);
 
   const schema = ds.properties || {};
@@ -285,7 +375,7 @@ async function handleUpload(request, env) {
     properties[summaryProp] = { rich_text: rich(summary.summary.slice(0, 2000)) };
   }
 
-  // Page body: audio → summary → action items → transcript.
+  // Page body: audio → summary → key points → action items → transcript.
   const children = [
     { object: "block", type: "audio", audio: { type: "file_upload", file_upload: { id: upload.id } } },
   ];
@@ -294,12 +384,16 @@ async function handleUpload(request, env) {
     children.push(heading("Summary"));
     for (const part of chunk(summary.summary)) children.push(paragraph(part));
   }
+  if (summary?.keyPoints.length) {
+    children.push(heading("Key points"));
+    for (const point of summary.keyPoints) children.push(bullet(point));
+  }
   if (summary?.actions.length) {
     children.push(heading("Action items"));
     for (const item of summary.actions) children.push(todo(item));
   }
   if (transcript) {
-    const body = chunk(transcript).map(paragraph);
+    const body = transcriptBlocks(transcript);
     if (summary) {
       // Tuck the raw text away so the summary is what you read first.
       children.push({
@@ -326,8 +420,9 @@ async function handleUpload(request, env) {
     ok: true,
     url: page.url,
     title,
-    transcribed: Boolean(transcript),
+    transcribed: Boolean(raw),
     summarized: Boolean(summary),
+    polished: Boolean(raw) && transcript !== raw,
   });
 }
 
