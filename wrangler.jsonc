@@ -10,12 +10,14 @@
   },
   "observability": { "enabled": true },
 
-  // Non-secret settings. Secrets (NOTION_TOKEN, APP_SECRET, OPENAI_API_KEY)
-  // are set with `wrangler secret put` or in the Cloudflare dashboard.
+  // Free Cloudflare AI. Powers both transcription and summaries.
+  // No API key, no card, no third-party account.
+  "ai": { "binding": "AI" },
+
+  // Non-secret settings. Secrets (NOTION_TOKEN, NOTION_DATABASE_ID, APP_SECRET)
+  // live in the dashboard under Settings → Variables and Secrets.
   "vars": {
-    "TIMEZONE": "Europe/Berlin"
-    // "NOTION_DATABASE_ID": "your32characterdatabaseid",
-    // "NOTION_AUDIO_PROP": "Attachments",
-    // "ALLOWED_ORIGIN": "https://username.github.io"
+    "TIMEZONE": "Europe/Berlin",
+    "TRANSCRIBE_MAX_MB": "3"
   }
 }
