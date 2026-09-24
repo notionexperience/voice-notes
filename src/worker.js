@@ -112,6 +112,15 @@ const decodeHeader = (v) => {
   }
 };
 
+// Words Whisper reliably mis-hears. Priming the model with them, and naming
+// them again during clean-up, fixes "motion" / "ocean" for "Notion".
+// Override with the VOCABULARY variable: a comma-separated list.
+const vocab = (env) =>
+  (env.VOCABULARY || "Notion, Notion AI, Obsidian, Apple Notes")
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+
 // ---- Transcription (free, Cloudflare Workers AI) ------------------------
 
 // btoa() chokes on very large argument lists, so encode in chunks.
@@ -139,6 +148,11 @@ async function transcribe(env, blob) {
       ? { audio: toBase64(buffer), task: "transcribe", vad_filter: true }
       : { audio: [...new Uint8Array(buffer)] };
     if (env.TRANSCRIBE_LANGUAGE) input.language = env.TRANSCRIBE_LANGUAGE;
+    const terms = vocab(env);
+    // Supported by whisper-large-v3-turbo; biases decoding toward these words.
+    if (terms.length && model.includes("turbo")) {
+      input.initial_prompt = `Terms used in this recording: ${terms.join(", ")}.`;
+    }
     const out = await env.AI.run(model, input);
     return (out?.text || "").trim();
   } catch {
@@ -152,21 +166,26 @@ async function transcribe(env, blob) {
 // costs roughly the latency of a single call.
 // Set POLISH_ENABLED="false" to keep the raw Whisper output.
 
-const POLISH_PROMPT = [
-  "You restore punctuation and capitalisation in speech-to-text output.",
-  "Rules:",
-  "- Keep every word the speaker said. Never summarise, reorder, add or delete content.",
-  "- Add full stops, commas, question marks and capital letters.",
-  "- Start a new paragraph when the topic shifts. Separate paragraphs with a blank line.",
-  "- Capitalise obvious product and brand names (for example 'notion' becomes 'Notion').",
-  "- Remove filler only when it is pure noise: um, uh, er.",
-  "Return the corrected text only. No preamble, no quotes, no commentary.",
-].join("\n");
+function polishPrompt(env) {
+  const terms = vocab(env);
+  return [
+    "You restore punctuation and capitalisation in speech-to-text output.",
+    "Rules:",
+    "- Keep every word the speaker said. Never summarise, reorder, add or delete content.",
+    "- Add full stops, commas, question marks and capital letters.",
+    "- Start a new paragraph when the topic shifts. Separate paragraphs with a blank line.",
+    "- Remove filler only when it is pure noise: um, uh, er.",
+    terms.length
+      ? `- The speaker uses these terms: ${terms.join(", ")}. Speech-to-text often mis-hears them as similar-sounding words (for example "motion" or "ocean" instead of "Notion"). Restore the correct term wherever the context makes it clear.`
+      : "- Capitalise obvious product and brand names.",
+    "Return the corrected text only. No preamble, no quotes, no commentary.",
+  ].join("\n");
+}
 
 async function polishChunk(env, model, text) {
   const out = await env.AI.run(model, {
     messages: [
-      { role: "system", content: POLISH_PROMPT },
+      { role: "system", content: polishPrompt(env) },
       { role: "user", content: text },
     ],
     max_tokens: Math.min(4000, Math.ceil(text.length / 2) + 200),
@@ -216,13 +235,14 @@ function summaryPrompt(env) {
     "You turn rambling voice notes into structured notes. The transcript is speech-to-text and may contain mis-hearings.",
     "Return JSON only, with these keys:",
     '- "title": a specific headline of at most 8 words. No quotes, no trailing period.',
-    '- "summary": 1-3 sentences on what this note is about. Do not enumerate the items — the arrays below do that.',
+    '- "summary": 2-4 sentences covering what was actually said, including the specifics. Name the items rather than counting them.',
     '- "key_points": an array of the note\'s substance: facts, observations, opinions, decisions, details worth keeping.',
     '- "actions": an array of short imperative tasks. Include anything the speaker wants to make, do, buy, fix, follow up on or decide. When the note is a list of ideas or plans, each entry becomes an action.',
     "Rules:",
     "- Never place the same item in both key_points and actions. Choose the better fit.",
     "- Never invent detail. Keep names, numbers and specifics exactly as spoken.",
     "- Use [] for an empty array, never null.",
+    `- Spell these terms exactly this way: ${vocab(env).join(", ")}.`,
     language,
   ].join("\n");
 }
@@ -333,13 +353,16 @@ async function handleUpload(request, env) {
     transcribe(env, file),
   ]);
 
-  // Schema read, byte push, summary and clean-up are all independent.
-  const [ds, upload, summary, transcript] = await Promise.all([
+  // Schema read, byte push and clean-up are independent.
+  const [ds, upload, transcript] = await Promise.all([
     notion(env, `/data_sources/${dataSourceId}`),
     uploadAudio(env, file, filename, mime),
-    summarize(env, raw),
     polish(env, raw),
   ]);
+
+  // Deliberately serial: summarising the corrected text stops Whisper's
+  // mis-hearings leaking into the summary and the action items.
+  const summary = await summarize(env, transcript || raw);
 
   const schema = ds.properties || {};
   const titleProp = pickProp(schema, "title", env.NOTION_TITLE_PROP);
