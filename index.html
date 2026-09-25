@@ -420,6 +420,60 @@
     }
   });
 
+  /* ---- talking to the API ----
+     Cloudflare Access answers an expired session with a redirect to its sign-in
+     page. A redirect is not JSON, so without this the app would report a bare
+     network error and you would have no idea what actually went wrong. */
+
+  function expiredError() {
+    var e = new Error("Your login expired");
+    e.expired = true;
+    return e;
+  }
+
+  // Ask the origin a cheap question. A redirect means Access wants a sign-in;
+  // anything else means the network itself is the problem.
+  async function loginGone() {
+    try {
+      var probe = await fetch(location.pathname + "?ping=" + Date.now(), {
+        method: "GET", credentials: "same-origin", redirect: "manual", cache: "no-store"
+      });
+      return probe.type === "opaqueredirect" || probe.status === 0;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // Returns the parsed JSON body, or throws an error worth showing a human.
+  async function apiFetch(url, options) {
+    var opts = { credentials: "same-origin", redirect: "manual" };
+    for (var k in options) opts[k] = options[k];
+
+    var res;
+    try {
+      res = await fetch(url, opts);
+    } catch (e) {
+      if (!navigator.onLine) throw new Error("You appear to be offline");
+      if (await loginGone()) throw expiredError();
+      throw new Error("Could not reach the server — check your connection and send again");
+    }
+
+    // redirect:"manual" turns the bounce to the sign-in page into this.
+    if (res.type === "opaqueredirect" || res.status === 0) throw expiredError();
+
+    var data;
+    try {
+      data = JSON.parse(await res.text());
+    } catch (e) {
+      // Our API only ever returns JSON. HTML here is the sign-in page.
+      throw expiredError();
+    }
+
+    if (res.status === 401) throw new Error("Unauthorized — the access key is missing or wrong");
+    if (!res.ok || !data.ok) throw new Error(data.error || ("Request failed (" + res.status + ")"));
+    return data;
+  }
+
   /* ---- long recordings: slice, transcribe, then upload ---- */
 
   // 16-bit mono WAV. Whisper accepts it and it needs no encoder library.
@@ -503,21 +557,20 @@
   async function transcribeSlices(parts) {
     var headers = { "content-type": "text/plain" };
     if (APP_SECRET) headers["x-app-secret"] = APP_SECRET;
-    var text = new Array(parts.length), next = 0, finished = 0, missed = 0;
+    var text = new Array(parts.length), next = 0, finished = 0, missed = 0, stop = null;
 
     async function lane() {
-      while (true) {
+      while (!stop) {
         var i = next++;
         if (i >= parts.length) return;
         try {
-          var res = await fetch(TRANSCRIBE_API, {
-            method: "POST", headers: headers, credentials: "same-origin",
-            body: await toBase64(parts[i])
+          var data = await apiFetch(TRANSCRIBE_API, {
+            method: "POST", headers: headers, body: await toBase64(parts[i])
           });
-          var data = await res.json().catch(function () { return {}; });
-          if (!res.ok || !data.ok) throw new Error(data.error || "failed");
           text[i] = (data.text || "").trim();
         } catch (e) {
+          // A lost session will fail every remaining slice. Stop and say so.
+          if (e.expired) { stop = e; return; }
           text[i] = ""; missed++;
         }
         finished++;
@@ -528,6 +581,7 @@
     var lanes = [];
     for (var k = 0; k < Math.min(3, parts.length); k++) lanes.push(lane());
     await Promise.all(lanes);
+    if (stop) throw stop;
     return { text: text.filter(Boolean).join(" ").trim(), missed: missed };
   }
 
@@ -574,10 +628,7 @@
       var headers = {};
       if (APP_SECRET) headers["x-app-secret"] = APP_SECRET;
 
-      var res = await fetch(API, { method: "POST", body: form, headers: headers, credentials: "same-origin" });
-      var data = await res.json().catch(function () { return {}; });
-      if (res.status === 401) throw new Error("Unauthorized — the access key is missing or wrong");
-      if (!res.ok || !data.ok) throw new Error(data.error || ("Upload failed (" + res.status + ")"));
+      var data = await apiFetch(API, { method: "POST", body: form, headers: headers });
 
       $("doneLink").href = data.url || "#";
       $("doneText").textContent = data.summarized
@@ -590,6 +641,26 @@
       note(warn ? "⚠️ " + warn : "Drop an audio file anywhere on this card to upload it.");
     } catch (err) {
       setStatus(err.message, true);
+      if (err.expired) {
+        // Reloading would throw the recording away. Signing in on a second tab
+        // sets the cookie for this origin, so Send then works straight away.
+        note(
+          '⚠️ Your sign-in expired. <a href="' + location.pathname + '" target="_blank" rel="noopener">Sign in again in a new tab</a>, ' +
+          'come back here and press <b>Send to Notion</b>. <b>Do not reload this page</b> — your recording is still loaded. ' +
+          'Or <a href="#" id="saveCopy">save a copy</a> first.'
+        );
+        var copy = $("saveCopy");
+        if (copy) copy.onclick = function (e) {
+          e.preventDefault();
+          if (!blob) return;
+          var a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = (($("title").value || "recording").replace(/[^\w\- ]+/g, "").trim() || "recording") +
+            (/mp4|m4a/.test(blob.type || "") ? ".m4a" : ".webm");
+          a.click();
+          setTimeout(function () { URL.revokeObjectURL(a.href); }, 10000);
+        };
+      }
       $("sendBtn").disabled = false;
     } finally {
       $("sendBtn").textContent = "Send to Notion";
