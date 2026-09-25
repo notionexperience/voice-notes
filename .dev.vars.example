@@ -16,6 +16,8 @@ APP_SECRET="some_long_random_string"
 
 # Transcription, summaries and punctuation all run on the free Workers AI
 # binding. No API key, no card, no third-party account.
+# Recordings larger than TRANSCRIBE_MAX_MB are cut into 40-second pieces by the
+# browser and transcribed one piece per request, so this is not a length limit.
 # CF_TRANSCRIBE_MODEL="@cf/openai/whisper-large-v3-turbo"
 # TRANSCRIBE_MAX_MB="3"
 # TRANSCRIBE_LANGUAGE="en"
@@ -29,7 +31,7 @@ APP_SECRET="some_long_random_string"
 
 # Transcript clean-up: restores punctuation, capitals and paragraphs.
 # POLISH_ENABLED="false"           # keep the raw Whisper output instead
-# POLISH_MAX_CHARS="12000"         # longer transcripts stay raw
+# POLISH_MAX_CHARS="40000"         # longer transcripts stay raw
 
 # Property name overrides — only needed if auto-detection picks the wrong one.
 # NOTION_TITLE_PROP=""
