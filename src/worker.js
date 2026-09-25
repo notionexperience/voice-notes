@@ -96,13 +96,19 @@ const todo = (content) => ({
   to_do: { rich_text: rich(content.slice(0, 1800)), checked: false },
 });
 
-// Respect the paragraph breaks the clean-up step introduced.
-const transcriptBlocks = (text) =>
-  text
+// Respect the paragraph breaks the clean-up step introduced, but never emit
+// more blocks than Notion will accept in one request.
+const transcriptBlocks = (text, limit = 95) => {
+  const blocks = text
     .split(/\n{2,}/)
     .map((p) => p.trim())
     .filter(Boolean)
     .flatMap((p) => chunk(p).map(paragraph));
+  if (blocks.length <= limit) return blocks;
+  // Too many short paragraphs: re-slice evenly so a long note still fits.
+  const size = Math.min(1800, Math.max(200, Math.ceil(text.length / limit)));
+  return chunk(text, size).slice(0, limit).map(paragraph);
+};
 
 const decodeHeader = (v) => {
   try {
@@ -160,6 +166,22 @@ async function transcribe(env, blob) {
   }
 }
 
+// The recorder normally slices long audio and base64-encodes it itself.
+// That keeps this Worker's CPU cost near zero, which is what removes the size
+// ceiling: each slice is its own request with its own CPU budget.
+// Errors are thrown, not swallowed, so the recorder knows to fall back.
+async function transcribeBase64(env, base64) {
+  if (!env.AI) throw new Error("Workers AI binding is not configured");
+  const model = env.CF_TRANSCRIBE_MODEL || "@cf/openai/whisper-large-v3-turbo";
+  if (!model.includes("turbo")) throw new Error("Chunked transcription needs a turbo Whisper model");
+  const input = { audio: base64, task: "transcribe", vad_filter: true };
+  if (env.TRANSCRIBE_LANGUAGE) input.language = env.TRANSCRIBE_LANGUAGE;
+  const terms = vocab(env);
+  if (terms.length) input.initial_prompt = `Terms used in this recording: ${terms.join(", ")}.`;
+  const out = await env.AI.run(model, input);
+  return (out?.text || "").trim();
+}
+
 // ---- Transcript clean-up (free, Cloudflare Workers AI) ------------------
 // Whisper returns one long unpunctuated lowercase run. This restores sentences
 // and paragraphs without rewording. Chunks run in parallel, so the whole step
@@ -201,12 +223,15 @@ async function polishChunk(env, model, text) {
 async function polish(env, transcript) {
   if (!env.AI || !transcript) return transcript;
   if (String(env.POLISH_ENABLED).toLowerCase() === "false") return transcript;
-  if (transcript.length > Number(env.POLISH_MAX_CHARS || 12000)) return transcript;
+  if (transcript.length > Number(env.POLISH_MAX_CHARS || 40000)) return transcript;
   const model = env.SUMMARY_MODEL || DEFAULT_LLM;
   try {
     const parts = chunk(transcript, 2000);
-    const cleaned = await Promise.all(parts.map((p) => polishChunk(env, model, p)));
-    return cleaned.join("\n\n");
+    // Bound the fan-out. Anything past the cap keeps its raw wording.
+    const head = parts.slice(0, 24);
+    const tail = parts.slice(24).join("");
+    const cleaned = await Promise.all(head.map((p) => polishChunk(env, model, p)));
+    return cleaned.join("\n\n") + (tail ? "\n\n" + tail : "");
   } catch {
     return transcript;
   }
@@ -339,8 +364,28 @@ async function handleUpload(request, env) {
     return json(env, 401, { ok: false, error: "Unauthorized" });
   }
 
-  const mime = (request.headers.get("content-type") || "audio/webm").split(";")[0];
-  const audio = await request.blob();
+  // Two accepted shapes. Multipart is what the recorder sends today and can
+  // carry a transcript it produced itself; a raw audio body keeps older
+  // recorders working after a Worker-only deploy.
+  const contentType = request.headers.get("content-type") || "";
+  let audio;
+  let mime;
+  let typedTitle = decodeHeader(request.headers.get("x-title"));
+  let rawTags = decodeHeader(request.headers.get("x-tags"));
+  let clientTranscript = "";
+
+  if (contentType.includes("multipart/form-data")) {
+    const form = await request.formData();
+    audio = form.get("audio");
+    if (!audio || typeof audio === "string") throw new Error("Missing audio file");
+    mime = (audio.type || "audio/webm").split(";")[0];
+    typedTitle = String(form.get("title") || typedTitle || "").trim();
+    rawTags = String(form.get("tags") || rawTags || "");
+    clientTranscript = String(form.get("transcript") || "").trim();
+  } else {
+    mime = contentType.split(";")[0] || "audio/webm";
+    audio = await request.blob();
+  }
   if (!audio.size) throw new Error("Empty recording");
 
   const ext = EXT_BY_MIME[mime] || "weba";
@@ -348,10 +393,12 @@ async function handleUpload(request, env) {
   const filename = `voice-note-${stamp}.${ext}`;
   const file = new File([audio], filename, { type: mime });
 
-  const [dataSourceId, raw] = await Promise.all([
+  const [dataSourceId, serverTranscript] = await Promise.all([
     resolveDataSourceId(env),
-    transcribe(env, file),
+    // Only transcribe here when the recorder could not do it itself.
+    clientTranscript ? Promise.resolve("") : transcribe(env, file),
   ]);
+  const raw = clientTranscript || serverTranscript;
 
   // Schema read, byte push and clean-up are independent.
   const [ds, upload, transcript] = await Promise.all([
@@ -373,7 +420,6 @@ async function handleUpload(request, env) {
   const summaryProp = byName(schema, env.NOTION_SUMMARY_PROP || "Summary", "rich_text");
 
   // Title: what the user typed → what the model named it → first words → timestamp.
-  const typedTitle = decodeHeader(request.headers.get("x-title"));
   const title =
     typedTitle ||
     summary?.title ||
@@ -388,7 +434,7 @@ async function handleUpload(request, env) {
       files: [{ type: "file_upload", file_upload: { id: upload.id }, name: filename }],
     };
   }
-  const tags = decodeHeader(request.headers.get("x-tags"))
+  const tags = rawTags
     .split(",")
     .map((t) => t.trim())
     .filter(Boolean);
@@ -416,13 +462,14 @@ async function handleUpload(request, env) {
     for (const item of summary.actions) children.push(todo(item));
   }
   if (transcript) {
-    const body = transcriptBlocks(transcript);
+    // Notion accepts 100 blocks per request, nested children included.
+    const body = transcriptBlocks(transcript, Math.max(1, 96 - children.length));
     if (summary) {
       // Tuck the raw text away so the summary is what you read first.
       children.push({
         object: "block",
         type: "toggle",
-        toggle: { rich_text: rich("Transcript"), children: body.slice(0, 95) },
+        toggle: { rich_text: rich("Transcript"), children: body },
       });
     } else {
       children.push(heading("Transcript"), ...body);
@@ -446,12 +493,32 @@ async function handleUpload(request, env) {
     transcribed: Boolean(raw),
     summarized: Boolean(summary),
     polished: Boolean(raw) && transcript !== raw,
+    chunked: Boolean(clientTranscript),
   });
 }
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+
+    // One audio slice in, one piece of text out. The recorder calls this
+    // repeatedly so recording length stops being limited by Worker CPU time.
+    if (url.pathname === "/api/transcribe") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: corsHeaders(env) });
+      }
+      if (request.method !== "POST") return json(env, 405, { ok: false, error: "Use POST" });
+      if (env.APP_SECRET && request.headers.get("x-app-secret") !== env.APP_SECRET) {
+        return json(env, 401, { ok: false, error: "Unauthorized" });
+      }
+      try {
+        const base64 = (await request.text()).trim();
+        if (!base64) throw new Error("Empty chunk");
+        return json(env, 200, { ok: true, text: await transcribeBase64(env, base64) });
+      } catch (err) {
+        return json(env, 500, { ok: false, error: err.message });
+      }
+    }
 
     if (url.pathname === "/api/send-to-notion") {
       if (request.method === "OPTIONS") {
