@@ -182,7 +182,7 @@
 
   <div class="done" id="done">
     <span class="tick">✓</span>
-    <span>Saved to Notion — <a id="doneLink" href="#" target="_blank" rel="noopener">open the note</a></span>
+    <span><b id="doneText">Saved to Notion</b> — <a id="doneLink" href="#" target="_blank" rel="noopener">open the note</a></span>
   </div>
 
   <div class="note" id="note">Drop an audio file anywhere on this card to upload it.</div>
@@ -195,6 +195,20 @@
   var params = new URLSearchParams(location.search);
   var API = params.get("api") || "/api/send-to-notion";
   var MAX_BYTES = 20 * 1024 * 1024;
+
+  /* ---- long-recording settings ----
+     Whisper takes one short clip at a time and a Worker gets a small CPU
+     budget per request. Slicing here turns a long note into many small
+     requests, which is what removes the old length limit. */
+  var TRANSCRIBE_API = params.get("transcribeApi") ||
+    (/\/api\/send-to-notion$/.test(API) ? API.replace(/\/api\/send-to-notion$/, "/api/transcribe") : "/api/transcribe");
+  var RATE = 16000;          // what Whisper wants; also keeps slices small
+  var SLICE_SEC = 40;
+  var CHUNK_ABOVE = 2.5 * 1048576;  // under this the Worker copes on its own
+  // Decoding expands audio into float32 PCM in memory, and running out of it
+  // kills the tab outright. Past this size we skip decoding and save audio only.
+  var DEVICE_GB = navigator.deviceMemory || (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ? 4 : 8);
+  var DECODE_MAX = Math.min(16, Math.max(4, Math.round(DEVICE_GB * 2))) * 1048576;
 
   /* ---- access key: accept ?key=, remember it, then clean the URL ---- */
   var KEY_STORE = "vtn_key";
@@ -288,7 +302,11 @@
     $("done").classList.remove("show");
     var mb = (b.size / 1048576).toFixed(2);
     if (b.size > MAX_BYTES) { setStatus("Too large: " + mb + " MB (max 20 MB)", true); $("sendBtn").disabled = true; }
-    else { setStatus("Ready to send · " + mb + " MB"); $("sendBtn").disabled = false; }
+    else {
+      setStatus("Ready to send · " + mb + " MB");
+      $("sendBtn").disabled = false;
+      if (b.size > DECODE_MAX) note("⚠️ That is a long recording. Your browser may not manage the transcript, but the audio will still be saved.");
+    }
   }
 
   /* ---- recording ---- */
@@ -402,6 +420,117 @@
     }
   });
 
+  /* ---- long recordings: slice, transcribe, then upload ---- */
+
+  // 16-bit mono WAV. Whisper accepts it and it needs no encoder library.
+  function wavBlob(pcm) {
+    var n = pcm.length, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf), o = 0;
+    function str(t) { for (var i = 0; i < t.length; i++) v.setUint8(o++, t.charCodeAt(i)); }
+    function u32(x) { v.setUint32(o, x, true); o += 4; }
+    function u16(x) { v.setUint16(o, x, true); o += 2; }
+    str("RIFF"); u32(36 + n * 2); str("WAVE");
+    str("fmt "); u32(16); u16(1); u16(1); u32(RATE); u32(RATE * 2); u16(2); u16(16);
+    str("data"); u32(n * 2);
+    for (var i = 0; i < n; i++) {
+      var x = pcm[i] < -1 ? -1 : pcm[i] > 1 ? 1 : pcm[i];
+      v.setInt16(o, x < 0 ? x * 0x8000 : x * 0x7fff, true); o += 2;
+    }
+    return new Blob([buf], { type: "audio/wav" });
+  }
+
+  // Cut on the quietest moment near the end of a slice so a word is far less
+  // likely to be sawn in half at the join.
+  function quietCut(pcm, start, ideal) {
+    if (ideal >= pcm.length) return pcm.length;
+    var win = Math.round(RATE * 0.02);
+    var from = Math.max(start + win, ideal - RATE * 3);
+    var best = ideal, quietest = Infinity;
+    for (var i = from; i + win <= ideal; i += win) {
+      var sum = 0;
+      for (var j = 0; j < win; j++) { var x = pcm[i + j]; sum += x * x; }
+      if (sum < quietest) { quietest = sum; best = i + win; }
+    }
+    return best;
+  }
+
+  // Native, so the base64 work costs the Worker nothing and cannot blow the stack.
+  function toBase64(b) {
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader();
+      r.onerror = function () { reject(new Error("Could not read audio slice")); };
+      r.onload = function () { resolve(String(r.result).split(",")[1] || ""); };
+      r.readAsDataURL(b);
+    });
+  }
+
+  // Returns WAV slices, or null when this browser cannot decode the recording.
+  // Safari regularly cannot read webm/opus, hence the null rather than a throw.
+  async function sliceForWhisper(b) {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    var OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!AC || !OAC) return null;
+    var ctx = null;
+    try {
+      ctx = new AC();
+      var decoded = await ctx.decodeAudioData(await b.arrayBuffer());
+      var frames = Math.ceil(decoded.duration * RATE);
+      if (!frames) return null;
+      // Rendering through a 1-channel context downmixes and resamples in one pass.
+      var off = new OAC(1, frames, RATE);
+      var src = off.createBufferSource();
+      src.buffer = decoded;
+      src.connect(off.destination);
+      src.start();
+      var mono = await off.startRendering();
+      decoded = null;
+      var pcm = mono.getChannelData(0);
+      var per = SLICE_SEC * RATE, parts = [], at = 0;
+      while (at < pcm.length) {
+        var end = at + per >= pcm.length ? pcm.length : quietCut(pcm, at, at + per);
+        parts.push(wavBlob(pcm.subarray(at, end)));
+        at = end;
+      }
+      return parts.length ? parts : null;
+    } catch (e) {
+      return null;
+    } finally {
+      if (ctx) { try { ctx.close(); } catch (e) {} }
+    }
+  }
+
+  // Three at a time. A slice that fails leaves a gap instead of losing the lot,
+  // and the caller reports the gap rather than hiding it.
+  async function transcribeSlices(parts) {
+    var headers = { "content-type": "text/plain" };
+    if (APP_SECRET) headers["x-app-secret"] = APP_SECRET;
+    var text = new Array(parts.length), next = 0, finished = 0, missed = 0;
+
+    async function lane() {
+      while (true) {
+        var i = next++;
+        if (i >= parts.length) return;
+        try {
+          var res = await fetch(TRANSCRIBE_API, {
+            method: "POST", headers: headers, credentials: "same-origin",
+            body: await toBase64(parts[i])
+          });
+          var data = await res.json().catch(function () { return {}; });
+          if (!res.ok || !data.ok) throw new Error(data.error || "failed");
+          text[i] = (data.text || "").trim();
+        } catch (e) {
+          text[i] = ""; missed++;
+        }
+        finished++;
+        setStatus("Transcribing… " + finished + " of " + parts.length);
+      }
+    }
+
+    var lanes = [];
+    for (var k = 0; k < Math.min(3, parts.length); k++) lanes.push(lane());
+    await Promise.all(lanes);
+    return { text: text.filter(Boolean).join(" ").trim(), missed: missed };
+  }
+
   /* ---- send ---- */
   $("discardBtn").onclick = function () { review(null); note("Drop an audio file anywhere on this card to upload it."); };
 
@@ -413,26 +542,52 @@
 
     $("sendBtn").disabled = true;
     $("sendBtn").innerHTML = '<span class="spin"></span>Sending…';
-    setStatus("Uploading to Notion…");
 
-    var headers = {
-      "content-type": blob.type || "audio/webm",
-      "x-title": encodeURIComponent($("title").value || ""),
-      "x-tags": encodeURIComponent(tags.join(","))
-    };
-    if (APP_SECRET) headers["x-app-secret"] = APP_SECRET;
+    var transcript = "", warn = "";
 
     try {
-      var res = await fetch(API, { method: "POST", body: blob, headers: headers, credentials: "same-origin" });
+      // Short notes go straight up: the Worker transcribes those in one pass.
+      if (blob.size > CHUNK_ABOVE) {
+        if (blob.size > DECODE_MAX) {
+          warn = "This recording was too large for your browser to process, so it was saved as audio only.";
+        } else {
+          setStatus("Preparing audio…");
+          var parts = await sliceForWhisper(blob);
+          if (!parts) {
+            warn = "Your browser could not read this audio, so it was saved as audio only. Safari often struggles with webm.";
+          } else {
+            var out = await transcribeSlices(parts);
+            transcript = out.text;
+            if (!transcript) warn = "None of the audio could be transcribed, so it was saved as audio only.";
+            else if (out.missed) warn = out.missed + " of " + parts.length + " parts could not be transcribed, so the transcript has gaps.";
+          }
+        }
+      }
+
+      setStatus(transcript ? "Writing to Notion…" : "Uploading to Notion…");
+      var form = new FormData();
+      form.append("audio", blob, blob.name || ("recording." + (/mp4|m4a/.test(blob.type || "") ? "m4a" : "webm")));
+      form.append("title", $("title").value || "");
+      form.append("tags", tags.join(","));
+      if (transcript) form.append("transcript", transcript);
+
+      var headers = {};
+      if (APP_SECRET) headers["x-app-secret"] = APP_SECRET;
+
+      var res = await fetch(API, { method: "POST", body: form, headers: headers, credentials: "same-origin" });
       var data = await res.json().catch(function () { return {}; });
       if (res.status === 401) throw new Error("Unauthorized — the access key is missing or wrong");
       if (!res.ok || !data.ok) throw new Error(data.error || ("Upload failed (" + res.status + ")"));
+
       $("doneLink").href = data.url || "#";
+      $("doneText").textContent = data.summarized
+        ? "Saved with summary and transcript"
+        : data.transcribed ? "Saved with transcript" : "Saved — audio only, no transcript";
       $("done").classList.add("show");
       $("title").value = ""; tags = []; renderTags();
       review(null);
       setStatus("Saved. Ready for the next one.");
-      note("Drop an audio file anywhere on this card to upload it.");
+      note(warn ? "⚠️ " + warn : "Drop an audio file anywhere on this card to upload it.");
     } catch (err) {
       setStatus(err.message, true);
       $("sendBtn").disabled = false;
