@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Setup check — Voice → Notion</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🩺</text></svg>" />
+<style>
+  :root{
+    --bg:#f6f5f4; --bg2:#ffffff;
+    --card:rgba(255,255,255,.72); --card-brd:rgba(0,0,0,.07);
+    --fg:#262523; --muted:#7d7b77; --line:#e6e4e1;
+    --accent:#2f6df6; --accent-fg:#fff;
+    --bad:#e5484d; --ok:#2f9e63; --warn:#d9822b;
+    --field:rgba(0,0,0,.035);
+    --shadow:0 1px 2px rgba(0,0,0,.05),0 12px 40px -12px rgba(0,0,0,.18);
+    --glow1:rgba(47,109,246,.20);
+  }
+  html[data-theme="dark"]{
+    --bg:#0f0f10; --bg2:#141416;
+    --card:rgba(30,30,33,.72); --card-brd:rgba(255,255,255,.08);
+    --fg:#ededec; --muted:#9a9895; --line:#2b2b2e;
+    --accent:#5b8cff; --accent-fg:#0b0b0c;
+    --bad:#ff6369; --ok:#48c78e; --warn:#f0a44a;
+    --field:rgba(255,255,255,.06);
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 18px 50px -14px rgba(0,0,0,.7);
+    --glow1:rgba(91,140,255,.22);
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; min-height:100%; background:var(--bg); color:var(--fg);
+    font:15px/1.55 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;
+    -webkit-font-smoothing:antialiased;
+    display:flex; justify-content:center; padding:28px 20px 60px; overflow-x:hidden;
+  }
+  body::before{
+    content:""; position:fixed; width:46vmax; height:46vmax; border-radius:50%;
+    background:var(--glow1); filter:blur(70px); top:-20vmax; right:-14vmax;
+    pointer-events:none; z-index:0;
+  }
+  .card{
+    position:relative; z-index:1; width:100%; max-width:620px;
+    background:var(--card); border:1px solid var(--card-brd); border-radius:16px;
+    box-shadow:var(--shadow); backdrop-filter:blur(14px); padding:24px;
+  }
+  h1{font-size:19px; margin:0 0 4px; letter-spacing:-.01em}
+  .sub{color:var(--muted); font-size:13.5px; margin:0 0 20px}
+  .row{display:flex; gap:11px; padding:13px 0; border-top:1px solid var(--line)}
+  .row:first-of-type{border-top:0}
+  .mark{flex:0 0 20px; font-size:15px; line-height:1.5; text-align:center}
+  .label{font-weight:600; font-size:14.5px}
+  .detail{color:var(--muted); font-size:13.5px; margin-top:2px}
+  .fix{
+    margin-top:8px; padding:9px 11px; border-radius:9px;
+    background:var(--field); font-size:13px; line-height:1.55;
+  }
+  .fix b{display:block; margin-bottom:3px; font-size:12px; text-transform:uppercase;
+    letter-spacing:.05em; color:var(--muted)}
+  .pass .mark{color:var(--ok)} .fail .mark{color:var(--bad)} .warn .mark{color:var(--warn)}
+  .skip{opacity:.55}
+  .optional .label::after{
+    content:"optional"; margin-left:7px; font-weight:500; font-size:11px;
+    text-transform:uppercase; letter-spacing:.05em; color:var(--muted);
+  }
+  .banner{padding:13px 15px; border-radius:11px; margin-bottom:18px; font-size:14px}
+  .banner.good{background:rgba(47,158,99,.12); border:1px solid rgba(47,158,99,.3)}
+  .banner.bad{background:rgba(229,72,77,.12); border:1px solid rgba(229,72,77,.3)}
+  input{
+    width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:9px;
+    background:var(--bg2); color:var(--fg); font:inherit; margin:10px 0;
+  }
+  button{
+    font:inherit; font-weight:600; border:0; border-radius:9px; padding:10px 16px;
+    background:var(--accent); color:var(--accent-fg); cursor:pointer;
+  }
+  button.ghost{background:transparent; color:var(--muted); border:1px solid var(--line)}
+  button:disabled{opacity:.55; cursor:default}
+  .actions{display:flex; gap:9px; flex-wrap:wrap; margin-top:22px;
+    padding-top:18px; border-top:1px solid var(--line)}
+  a{color:var(--accent)}
+  .foot{color:var(--muted); font-size:12.5px; margin-top:16px}
+  #gate{display:none}
+</style>
+</head>
+<body>
+<main class="card">
+  <h1>Setup check</h1>
+  <p class="sub">Reads your settings and reports what is wrong. Nothing is written to Notion.</p>
+
+  <div id="gate">
+    <p style="font-size:14px;margin:0">Enter the passphrase you chose as <code>APP_SECRET</code> when you deployed.</p>
+    <input id="secret" type="password" autocomplete="current-password" placeholder="Passphrase" />
+    <button id="unlock">Run the check</button>
+  </div>
+
+  <div id="out" aria-live="polite"></div>
+
+  <div class="actions" id="actions" hidden>
+    <button id="again">Run again</button>
+    <button class="ghost" id="copy">Copy report</button>
+    <button class="ghost" id="forget">Forget passphrase</button>
+  </div>
+  <p class="foot">Back to the <a href="./">recorder</a>.</p>
+</main>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var params = new URLSearchParams(location.search);
+  var API = params.get("api") || "/api/check";
+  var KEY_STORE = "vtn_key";
+  var MARK = { pass: "\u2713", fail: "\u2715", warn: "!", skip: "\u00b7" };
+  var last = null;
+
+  var root = document.documentElement;
+  var saved = null;
+  try { saved = localStorage.getItem("vtn_theme"); } catch (e) {}
+  root.dataset.theme = saved || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+
+  function getKey() {
+    if (params.get("key")) return params.get("key");
+    try { return localStorage.getItem(KEY_STORE) || ""; } catch (e) { return ""; }
+  }
+  function setKey(v) { try { localStorage.setItem(KEY_STORE, v); } catch (e) {} }
+
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function message(kind, html) {
+    $("out").innerHTML = '<div class="banner ' + kind + '">' + html + "</div>";
+  }
+
+  function render(data) {
+    last = data;
+    var s = data.summary || { passed: 0, warnings: 0, failed: 0 };
+    var head = data.ok
+      ? '<div class="banner good"><b>Ready to use.</b> ' +
+        (s.warnings ? s.warnings + " optional item" + (s.warnings > 1 ? "s are" : " is") + " not set up, but nothing is broken." : "Everything checks out.") +
+        "</div>"
+      : '<div class="banner bad"><b>' + s.failed + " problem" + (s.failed > 1 ? "s" : "") +
+        " to fix.</b> Each one below says exactly what to do.</div>";
+
+    var rows = (data.checks || []).map(function (c) {
+      var cls = c.status + (c.optional && c.status !== "fail" ? " optional" : "");
+      return (
+        '<div class="row ' + cls + '">' +
+          '<div class="mark">' + MARK[c.status] + "</div>" +
+          "<div>" +
+            '<div class="label">' + esc(c.label) + "</div>" +
+            '<div class="detail">' + esc(c.detail) + "</div>" +
+            (c.fix ? '<div class="fix"><b>How to fix</b>' + esc(c.fix) + "</div>" : "") +
+          "</div>" +
+        "</div>"
+      );
+    }).join("");
+
+    $("out").innerHTML = head + rows;
+    $("actions").hidden = false;
+  }
+
+  function report(data) {
+    var lines = [
+      "Voice \u2192 Notion setup check",
+      "Run at: " + (data.checkedAt || ""),
+      data.workspace ? "Workspace: " + data.workspace : "",
+      data.integration ? "Integration: " + data.integration : "",
+      "",
+    ].filter(Boolean);
+    (data.checks || []).forEach(function (c) {
+      lines.push("[" + c.status.toUpperCase() + "] " + c.label + " \u2014 " + c.detail);
+    });
+    return lines.join("\n");
+  }
+
+  function run() {
+    var key = getKey();
+    if (!key) { $("gate").style.display = "block"; $("out").innerHTML = ""; $("actions").hidden = true; return; }
+    $("gate").style.display = "none";
+    message("good", "Checking\u2026");
+
+    fetch(API, { method: "GET", headers: { "x-app-secret": key }, redirect: "manual" })
+      .then(function (res) {
+        // A login page redirect comes back opaque or as HTML, never as our JSON.
+        if (res.type === "opaqueredirect" || res.status === 0) throw new Error("__login__");
+        var type = res.headers.get("content-type") || "";
+        if (type.indexOf("application/json") === -1) throw new Error("__login__");
+        return res.json().then(function (body) { return { status: res.status, body: body }; });
+      })
+      .then(function (r) {
+        if (r.status === 401) {
+          $("gate").style.display = "block";
+          $("actions").hidden = true;
+          message("bad", "<b>That passphrase does not match.</b> It must be exactly the APP_SECRET you set in Cloudflare \u2014 no extra spaces.");
+          return;
+        }
+        if (!r.body || !r.body.checks) {
+          message("bad", "<b>The check could not run.</b> " + esc((r.body && r.body.error) || "Unknown error."));
+          return;
+        }
+        render(r.body);
+      })
+      .catch(function (err) {
+        if (err.message === "__login__") {
+          message("bad",
+            "<b>Your login expired.</b> " +
+            '<a href="" target="_blank" rel="noopener">Sign in again in a new tab</a>, then press Run again.');
+          $("out").querySelector("a").href = location.href;
+          $("actions").hidden = false;
+          return;
+        }
+        message("bad", "<b>Could not reach your Worker.</b> Check your internet connection, then press Run again. (" + esc(err.message) + ")");
+        $("actions").hidden = false;
+      });
+  }
+
+  $("unlock").onclick = function () {
+    var v = $("secret").value.trim();
+    if (!v) return;
+    setKey(v);
+    $("secret").value = "";
+    run();
+  };
+  $("secret").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") $("unlock").click();
+  });
+  $("again").onclick = run;
+  $("forget").onclick = function () {
+    try { localStorage.removeItem(KEY_STORE); } catch (e) {}
+    location.href = location.pathname;
+  };
+  $("copy").onclick = function () {
+    if (!last) return;
+    var btn = $("copy");
+    navigator.clipboard.writeText(report(last)).then(function () {
+      btn.textContent = "Copied";
+      setTimeout(function () { btn.textContent = "Copy report"; }, 1600);
+    });
+  };
+
+  run();
+})();
+</script>
+</body>
+</html>
