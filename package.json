@@ -1,5 +1,5 @@
 {
-  "name": "voice-notes",
+  "name": "voice-to-notion",
   "version": "1.0.0",
   "private": true,
   "description": "Record a voice note in the browser and file it in a Notion database.",
@@ -7,6 +7,25 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"
+  },
+  "cloudflare": {
+    "bindings": {
+      "NOTION_TOKEN": {
+        "description": "Your Notion internal integration secret; it starts with ntn_. Get it in Notion: Settings → Connections → Develop or manage integrations → New integration → pick your workspace → Save → copy 'Internal Integration Secret'. One more step after deploying: open your notes database as a full page, click ••• → Connections → Connect to → choose the same integration. Without that, saving fails with 'could not find database'."
+      },
+      "NOTION_DATABASE_ID": {
+        "description": "The 32-character ID of the Notion database your notes are saved into. Open the database as a full page and copy the address: the ID is the block of letters and numbers after the last slash and before the ?v=. In notion.so/me/8f0c1e7b2a4d4f9e8c1d2b3a4f5e6d7c?v=1234 the ID is 8f0c1e7b2a4d4f9e8c1d2b3a4f5e6d7c. Dashes are fine."
+      },
+      "APP_SECRET": {
+        "description": "A passphrase you invent now — it is the only thing standing between your Notion database and anyone who learns your app's web address, so make it long and random rather than memorable. You type it once on first use and the app remembers it on that device."
+      },
+      "TIMEZONE": {
+        "description": "Your IANA time zone, used when a note is named after its date. Examples: Europe/Berlin, America/New_York, Asia/Tokyo. Keep the Region/City spelling and capitals exactly."
+      },
+      "TRANSCRIBE_MAX_MB": {
+        "description": "Safety ceiling for how much audio is transcribed in a single request. This is NOT a recording-length limit — longer recordings are sliced up in your browser and sent piece by piece. Leave it at 3 unless you have a reason to change it."
+      }
+    }
   },
   "devDependencies": {
     "wrangler": "^4"
