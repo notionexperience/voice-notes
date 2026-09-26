@@ -23,7 +23,7 @@ const EXT_BY_MIME = {
 const corsHeaders = (env) => ({
   "Access-Control-Allow-Origin": env.ALLOWED_ORIGIN || "*",
   "Access-Control-Allow-Headers": "content-type, x-app-secret, x-title, x-tags",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
 });
 
 const json = (env, status, body) =>
@@ -497,6 +497,329 @@ async function handleUpload(request, env) {
   });
 }
 
+// ---- Install self-check -------------------------------------------------
+// A read-only diagnosis of a fresh install. It never writes to Notion, so it
+// is safe to run as often as you like. public/check.html renders the result as
+// a green / red checklist, which answers most setup questions without support.
+
+const MIB = 1048576;
+// Two real recordings from this app measured 129 and 215 kbps. Used only to
+// turn a byte limit into "about N minutes".
+const BYTES_PER_MIN_LOW = 967500;
+const BYTES_PER_MIN_HIGH = 1612500;
+// Notion accepts a one-shot upload of at most 20 MiB, whatever the plan allows.
+const SINGLE_PART_MAX = 20 * MIB;
+
+const minutesFor = (bytes) =>
+  `${Math.floor(bytes / BYTES_PER_MIN_HIGH)}\u2013${Math.floor(bytes / BYTES_PER_MIN_LOW)} minutes`;
+
+// Same call as notion(), but a failure comes back as data instead of throwing —
+// a check that fails still has to report the ones after it.
+async function notionProbe(env, path) {
+  try {
+    return { ok: true, data: await notion(env, path) };
+  } catch (err) {
+    const code = /\s(\d{3}):\s/.exec(err.message);
+    return { ok: false, status: code ? Number(code[1]) : 0, message: err.message };
+  }
+}
+
+async function runChecks(env) {
+  const checks = [];
+  const add = (id, label, status, detail, fix = "", optional = false) =>
+    checks.push({ id, label, status, detail, fix, optional });
+
+  // --- 1. Answerable without leaving the Worker --------------------------
+
+  if (env.APP_SECRET) {
+    add("app_secret", "Passphrase is set", "pass", "Requests without the passphrase are rejected.");
+  } else {
+    add(
+      "app_secret",
+      "Passphrase is set",
+      "fail",
+      "APP_SECRET is empty, so anyone who finds this web address can write into your Notion database.",
+      "Cloudflare dashboard \u2192 Workers & Pages \u2192 your Worker \u2192 Settings \u2192 Variables and Secrets \u2192 Add. Name it APP_SECRET, choose Secret, paste a long random passphrase, then Deploy.",
+    );
+  }
+
+  add(
+    "ai_binding",
+    "Workers AI is connected",
+    env.AI ? "pass" : "fail",
+    env.AI
+      ? "Transcription, clean-up and summaries are available."
+      : "No AI binding found. Notes would still save, but with audio only \u2014 no transcript and no summary.",
+    env.AI ? "" : 'wrangler.jsonc must contain "ai": { "binding": "AI" }. Put it back and deploy again.',
+  );
+
+  try {
+    const now = new Date().toLocaleString("en-GB", { timeZone: env.TIMEZONE || "UTC" });
+    add(
+      "timezone",
+      "Time zone",
+      env.TIMEZONE ? "pass" : "warn",
+      env.TIMEZONE
+        ? `TIMEZONE is ${env.TIMEZONE}, so an auto-named note reads ${now}.`
+        : `TIMEZONE is not set, so auto-named notes use UTC and read ${now}.`,
+      env.TIMEZONE ? "" : "Set the TIMEZONE variable to your IANA zone, e.g. Europe/Berlin or America/New_York.",
+      !env.TIMEZONE,
+    );
+  } catch (err) {
+    add(
+      "timezone",
+      "Time zone",
+      "fail",
+      `\u201c${env.TIMEZONE}\u201d is not a valid IANA time zone, so dates cannot be formatted.`,
+      "Use a Region/City name with the same capitals, e.g. Europe/Berlin, America/New_York, Asia/Tokyo.",
+    );
+  }
+
+  // --- 2. The token ------------------------------------------------------
+
+  const token = (env.NOTION_TOKEN || "").trim();
+  const tokenFix =
+    "In Notion: Settings \u2192 Connections \u2192 Develop or manage integrations \u2192 New integration \u2192 pick your workspace \u2192 Save, then copy the Internal Integration Secret. Paste it into Cloudflare \u2192 your Worker \u2192 Settings \u2192 Variables and Secrets \u2192 NOTION_TOKEN, and Deploy.";
+
+  if (!token) {
+    add("token", "Notion token is present", "fail", "NOTION_TOKEN is empty.", tokenFix);
+  } else if (!/^(ntn_|secret_)/.test(token)) {
+    add(
+      "token",
+      "Notion token is present",
+      "warn",
+      "NOTION_TOKEN does not start with ntn_ or secret_, so it may be the wrong value.",
+      tokenFix,
+      true,
+    );
+  } else {
+    add("token", "Notion token is present", "pass", "Looks like an internal integration secret.");
+  }
+
+  let integrationName = "your integration";
+  let workspaceName = "";
+  let tokenWorks = false;
+  let maxUpload = 0;
+
+  if (token) {
+    const me = await notionProbe(env, "/users/me");
+    if (me.ok) {
+      tokenWorks = true;
+      integrationName = me.data.name || integrationName;
+      workspaceName = me.data.bot?.workspace_name || "";
+      maxUpload = Number(me.data.bot?.workspace_limits?.max_file_upload_size_in_bytes) || 0;
+      add(
+        "token_valid",
+        "Notion accepts the token",
+        "pass",
+        `Connected as \u201c${integrationName}\u201d${workspaceName ? ` in the \u201c${workspaceName}\u201d workspace` : ""}.`,
+      );
+    } else if (me.status === 401) {
+      add(
+        "token_valid",
+        "Notion accepts the token",
+        "fail",
+        "Notion rejected the token. It has been revoked, the integration was deleted, or a space or quote mark was copied along with it.",
+        tokenFix,
+      );
+    } else {
+      add("token_valid", "Notion accepts the token", "fail", me.message, tokenFix);
+    }
+  } else {
+    add("token_valid", "Notion accepts the token", "skip", "Nothing to test until NOTION_TOKEN is set.");
+  }
+
+  // --- 3. The database ---------------------------------------------------
+
+  const rawId = (env.NOTION_DATABASE_ID || "").trim();
+  const dbId = rawId.replace(/-/g, "");
+  const idLooksRight = /^[0-9a-f]{32}$/i.test(dbId);
+  const idFix =
+    "Open the database in Notion as a full page and copy the address. The ID is the 32 letters and numbers after the last slash and before the ?v= \u2014 the part after ?v= identifies the view, not the database.";
+
+  if (!rawId) {
+    add("database_id", "Database ID has the right shape", "fail", "NOTION_DATABASE_ID is empty.", idFix);
+  } else if (!idLooksRight) {
+    add(
+      "database_id",
+      "Database ID has the right shape",
+      "fail",
+      `NOTION_DATABASE_ID is ${dbId.length} characters once dashes are removed; a Notion ID is 32. The whole link, the view ID or a page title is usually what got pasted.`,
+      idFix,
+    );
+  } else {
+    add("database_id", "Database ID has the right shape", "pass", "32 characters, correct shape.");
+  }
+
+  let schema = null;
+
+  if (tokenWorks && idLooksRight) {
+    const db = await notionProbe(env, `/databases/${dbId}`);
+    if (db.ok) {
+      const dbTitle = (db.data.title || []).map((t) => t.plain_text).join("") || "your database";
+      add("database_access", "The integration can open the database", "pass", `Found \u201c${dbTitle}\u201d.`);
+
+      const dsId = db.data.data_sources?.[0]?.id;
+      if (!dsId) {
+        add(
+          "data_source",
+          "The database has a data source",
+          "fail",
+          "Notion returned the database but no data source, which normally means this is a linked view rather than the real database.",
+          "Use the ID of the original database, not of a linked or synced copy.",
+        );
+      } else {
+        const ds = await notionProbe(env, `/data_sources/${dsId}`);
+        if (ds.ok) {
+          schema = ds.data.properties || {};
+          add("data_source", "The database has a data source", "pass", "Schema read successfully.");
+        } else {
+          add("data_source", "The database has a data source", "fail", ds.message);
+        }
+      }
+    } else if (db.status === 404) {
+      add(
+        "database_access",
+        "The integration can open the database",
+        "fail",
+        `Your token works, but this database is invisible to \u201c${integrationName}\u201d. Nine times out of ten the integration has simply not been added to the page yet \u2014 this is the most common setup mistake by a wide margin.`,
+        `In Notion, open the database as a full page \u2192 \u2022\u2022\u2022 menu, top right \u2192 Connections \u2192 Connect to \u2192 pick \u201c${integrationName}\u201d \u2192 Confirm. Then run this check again. If you have already done that, the ID belongs to a different database.`,
+      );
+    } else if (db.status === 400) {
+      add(
+        "database_access",
+        "The integration can open the database",
+        "fail",
+        "Notion says this ID is not a database \u2014 most likely it is the ID of an ordinary page or of a view.",
+        idFix,
+      );
+    } else {
+      add("database_access", "The integration can open the database", "fail", db.message);
+    }
+  } else {
+    add(
+      "database_access",
+      "The integration can open the database",
+      "skip",
+      "Skipped until the token and the ID above are both correct.",
+    );
+  }
+
+  // --- 4. Properties -----------------------------------------------------
+
+  if (schema) {
+    const titleProp = pickProp(schema, "title", env.NOTION_TITLE_PROP);
+    const filesProp = pickProp(schema, "files", env.NOTION_AUDIO_PROP);
+    const tagsProp = pickProp(schema, "multi_select", env.NOTION_TAGS_PROP);
+    const dateProp = pickProp(schema, "date", env.NOTION_DATE_PROP);
+    const audioFlag = byName(schema, env.NOTION_AUDIO_FLAG_PROP || "Audio", "checkbox");
+    const summaryProp = byName(schema, env.NOTION_SUMMARY_PROP || "Summary", "rich_text");
+
+    add(
+      "prop_title",
+      "Title property",
+      titleProp ? "pass" : "fail",
+      titleProp ? `Notes are named in \u201c${titleProp}\u201d.` : "No title property found, so notes cannot be named.",
+      titleProp ? "" : "Every Notion database has one. If you renamed it, set NOTION_TITLE_PROP to its name.",
+    );
+
+    add(
+      "prop_files",
+      "Attachment property",
+      filesProp ? "pass" : "warn",
+      filesProp
+        ? `The recording is attached to \u201c${filesProp}\u201d.`
+        : "No Files & media property. The recording still plays inside the note, but it will not show in a column.",
+      filesProp ? "" : "Add a Files & media property, or set NOTION_AUDIO_PROP to the one you want used.",
+      !filesProp,
+    );
+
+    add(
+      "prop_tags",
+      "Tags property",
+      tagsProp ? "pass" : "warn",
+      tagsProp ? `Tags you type go to \u201c${tagsProp}\u201d.` : "No multi-select property, so tags typed in the app are discarded.",
+      tagsProp ? "" : "Add a Multi-select property named Tags, or set NOTION_TAGS_PROP.",
+      !tagsProp,
+    );
+
+    add(
+      "prop_summary",
+      "Summary property",
+      summaryProp ? "pass" : "warn",
+      summaryProp
+        ? `The one-line summary is copied into \u201c${summaryProp}\u201d.`
+        : "No text property named Summary, so the summary appears only inside the note.",
+      summaryProp ? "" : "Add a Text property named Summary, or set NOTION_SUMMARY_PROP.",
+      !summaryProp,
+    );
+
+    add(
+      "prop_date",
+      "Date property",
+      dateProp ? "pass" : "warn",
+      dateProp
+        ? `Recording time is written to \u201c${dateProp}\u201d.`
+        : "No date property. Notion's own Created time still records when the note arrived.",
+      "",
+      !dateProp,
+    );
+
+    add(
+      "prop_audio_flag",
+      "Audio checkbox",
+      audioFlag ? "pass" : "warn",
+      audioFlag ? `\u201c${audioFlag}\u201d is ticked on every voice note.` : "No checkbox named Audio, so voice notes are not flagged.",
+      "",
+      !audioFlag,
+    );
+  }
+
+  // --- 5. How long a recording this workspace will actually accept -------
+
+  if (maxUpload) {
+    const effective = Math.min(maxUpload, SINGLE_PART_MAX);
+    const capped = maxUpload <= 5 * MIB;
+    add(
+      "file_limit",
+      "Longest recording this workspace accepts",
+      capped ? "warn" : "pass",
+      capped
+        ? `Your Notion plan caps uploads at ${Math.round(maxUpload / MIB)} MiB \u2014 roughly ${minutesFor(effective)} of speech. A longer note is transcribed and summarised correctly, then rejected by Notion when the audio is attached, and nothing is saved.`
+        : `Your plan allows ${Math.round(maxUpload / MIB)} MiB per file. Audio is sent in one piece, so the practical ceiling is ${Math.round(effective / MIB)} MiB \u2014 roughly ${minutesFor(effective)} of speech.`,
+      capped
+        ? "Keep notes under that length, or upgrade the Notion workspace to a paid plan, which raises the limit to 5 GiB."
+        : "",
+      capped,
+    );
+  } else if (tokenWorks) {
+    add(
+      "file_limit",
+      "Longest recording this workspace accepts",
+      "skip",
+      "Notion did not report a file size limit for this integration.",
+      "",
+      true,
+    );
+  }
+
+  const failed = checks.filter((c) => c.status === "fail").length;
+
+  return {
+    ok: failed === 0,
+    checkedAt: new Date().toISOString(),
+    workspace: workspaceName,
+    integration: tokenWorks ? integrationName : "",
+    maxUploadBytes: maxUpload,
+    summary: {
+      passed: checks.filter((c) => c.status === "pass").length,
+      warnings: checks.filter((c) => c.status === "warn").length,
+      failed,
+    },
+    checks,
+  };
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -515,6 +838,30 @@ export default {
         const base64 = (await request.text()).trim();
         if (!base64) throw new Error("Empty chunk");
         return json(env, 200, { ok: true, text: await transcribeBase64(env, base64) });
+      } catch (err) {
+        return json(env, 500, { ok: false, error: err.message });
+      }
+    }
+
+    // A read-only checklist for a fresh install: passphrase, AI binding,
+    // token, database, properties, upload limit. public/check.html renders it.
+    if (url.pathname === "/api/check") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: corsHeaders(env) });
+      }
+      if (request.method !== "GET" && request.method !== "POST") {
+        return json(env, 405, { ok: false, error: "Use GET" });
+      }
+      const given = request.headers.get("x-app-secret") || url.searchParams.get("secret") || "";
+      if (env.APP_SECRET && given !== env.APP_SECRET) {
+        return json(env, 401, {
+          ok: false,
+          error: "Unauthorized",
+          hint: "That passphrase does not match APP_SECRET.",
+        });
+      }
+      try {
+        return json(env, 200, await runChecks(env));
       } catch (err) {
         return json(env, 500, { ok: false, error: err.message });
       }
